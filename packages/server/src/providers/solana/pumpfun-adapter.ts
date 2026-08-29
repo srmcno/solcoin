@@ -73,7 +73,19 @@ export interface PumpFunAdapterOptions {
 export class PumpFunLaunchAdapter implements LaunchAdapter {
   readonly id = 'pumpfun_sdk';
   readonly label = 'Pump.fun (on-chain SDK)';
-  readonly networks: ExecutionNetwork[] = ['devnet', 'mainnet'];
+
+  /**
+   * The one network this instance can actually reach.
+   *
+   * The program is deployed at the same addresses on devnet and mainnet, so it
+   * is tempting to declare both. That would be a lie about *this* object: its
+   * RPC connection was fixed when it was constructed. Declaring both let
+   * `adapterFor(network)` hand back an adapter still pointed at the old chain
+   * after an operator switched networks, so a launch recorded as devnet would
+   * broadcast to mainnet and spend real SOL. Naming only the bound network
+   * makes that mismatch a refusal instead.
+   */
+  readonly networks: ExecutionNetwork[];
 
   private readonly log = componentLogger('pumpfun-adapter');
   private offline: InstanceType<PumpSdkModule['PumpSdk']> | null = null;
@@ -82,6 +94,7 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
 
   constructor(private readonly options: PumpFunAdapterOptions) {
     this.now = options.now ?? Date.now;
+    this.networks = [options.network];
     if (!options.mintDerivationSecret || options.mintDerivationSecret.length < 16) {
       throw new AppError('not_configured', 'A mint derivation secret of at least 16 characters is required.');
     }

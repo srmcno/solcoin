@@ -139,26 +139,98 @@ export async function buildAllProviders(deps: BuildProvidersDeps): Promise<Built
         maxConcurrentRequests: ai.maxConcurrentRequests,
       };
     },
-    canSpend: async (usdEstimate) => {
+    /*
+     * Approving a call and committing what it may cost, in one step.
+     *
+     * The router runs calls concurrently — a whole evaluation panel goes out
+     * under `Promise.allSettled`, up to `maxConcurrentRequests` at a time. Each
+     * one used to read the historical spend, then make its provider call, then
+     * record what it actually cost. Near the cap that means every one of them
+     * reads the same total, every one is approved, and their combined cost
+     * clears a budget none of them individually exceeded.
+     *
+     * So the estimate is written as a reservation in the same synchronous
+     * transaction that approves it — better-sqlite3 has no `await` inside a
+     * transaction body, so nothing can interleave — and the next caller sees it
+     * in the total. `recordUsage` then reconciles the reservation to what the
+     * call actually cost, which is usually less: the estimate assumes the model
+     * emits every one of `maxOutputTokens`.
+     *
+     * A reservation whose process dies before reconciling stays at the
+     * estimate for the rest of the window. That is the conservative direction —
+     * it over-counts spend rather than under-counting it — and `error_code`
+     * marks it so the maintenance job can tell it apart from a call that
+     * genuinely failed.
+     */
+    canSpend: async (usdEstimate, context) => {
       if (!deps.db) return { allowed: true };
       const settings = deps.settings.get();
       if (settings.emergencyStop) {
         return { allowed: false, reason: 'Emergency stop is engaged.' };
       }
-      const row = deps.db.$raw
-        .prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_requests WHERE created_at >= ?')
-        .get(deps.now() - 86_400_000) as { total: number };
-      const spent = row?.total ?? 0;
-      if (spent + usdEstimate > settings.limits.maxAiSpendUsdPerDay) {
-        return {
-          allowed: false,
-          reason: `Daily AI budget exhausted: $${spent.toFixed(2)} of $${settings.limits.maxAiSpendUsdPerDay} spent in the last 24 hours.`,
-        };
-      }
-      return { allowed: true };
+
+      const db = deps.db;
+      const at = deps.now();
+      const reservationId = newId('air', at);
+
+      const decide = db.$raw.transaction(() => {
+        const row = db.$raw
+          .prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_requests WHERE created_at >= ?')
+          .get(at - 86_400_000) as { total: number };
+        const spent = row?.total ?? 0;
+        if (spent + usdEstimate > settings.limits.maxAiSpendUsdPerDay) {
+          return {
+            allowed: false as const,
+            reason: `Daily AI budget exhausted: $${spent.toFixed(2)} of $${settings.limits.maxAiSpendUsdPerDay} spent in the last 24 hours.`,
+          };
+        }
+        db.$raw
+          .prepare(
+            `INSERT INTO ai_requests (id, provider, model, purpose, cost_usd, ok, error_code, created_at)
+             VALUES (?,?,?,?,?,0,'reserved',?)`,
+          )
+          .run(reservationId, 'reserved', context.model, context.purpose, usdEstimate, at);
+        return { allowed: true as const, reservationId };
+      });
+
+      return decide();
     },
     recordUsage: async (record: AiUsageRecord) => {
       if (!deps.db) return;
+
+      // Reconcile the reservation this call was approved against, rather than
+      // adding a second row: the estimate is already counted against the
+      // budget, and inserting alongside it would charge the call twice.
+      if (record.reservationId) {
+        const updated = deps.db.$raw
+          .prepare(
+            `UPDATE ai_requests
+                SET provider = ?, model = ?, ref_type = ?, ref_id = ?, prompt_tokens = ?, completion_tokens = ?,
+                    cached_tokens = ?, cost_usd = ?, latency_ms = ?, cache_hit = ?, ok = ?, error_code = NULL,
+                    error = ?, schema_retries = ?
+              WHERE id = ? AND error_code = 'reserved'`,
+          )
+          .run(
+            record.provider,
+            record.model,
+            record.refType ?? null,
+            record.refId ?? null,
+            record.promptTokens,
+            record.completionTokens,
+            record.cachedTokens,
+            record.costUsd,
+            record.latencyMs,
+            record.cacheHit ? 1 : 0,
+            record.ok ? 1 : 0,
+            record.error ?? null,
+            record.schemaRetries,
+            record.reservationId,
+          ).changes;
+        // A reservation already reconciled (a retried attempt reusing the same
+        // approval) falls through to an ordinary insert rather than vanishing.
+        if (updated > 0) return;
+      }
+
       deps.db.$raw
         .prepare(
           `INSERT INTO ai_requests (id, provider, model, purpose, ref_type, ref_id, prompt_tokens, completion_tokens,

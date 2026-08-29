@@ -68,6 +68,8 @@ export interface AiUsageRecord {
   ok: boolean;
   error?: string;
   at: number;
+  /** The reservation this call was approved against, when there was one. */
+  reservationId?: string;
 }
 
 export interface AiResponseCache {
@@ -106,11 +108,18 @@ export interface AiRouterDeps {
   /**
    * Budget gate. Returning `{allowed:false}` must stop the call — this is the
    * platform's only defence against an unbounded spend loop.
+   *
+   * An implementation may return a `reservationId`, having recorded the
+   * estimate as committed spend in the same breath as approving it. Without
+   * that, concurrent calls all read the same historical total before any of
+   * them records anything, and near the cap every one of them is approved for
+   * a combined cost the cap forbids. Whatever it returns is passed back on the
+   * matching `recordUsage` so the estimate can be reconciled to the truth.
    */
   canSpend: (
     usdEstimate: number,
     context: { tier: AiTier; model: string; purpose: string },
-  ) => Promise<{ allowed: boolean; reason?: string }>;
+  ) => Promise<{ allowed: boolean; reason?: string; reservationId?: string }>;
   recordUsage: (record: AiUsageRecord) => Promise<void>;
   cache?: AiResponseCache;
   clock?: Clock;
@@ -234,7 +243,7 @@ export class AiRouter {
       let attempt = base;
 
       for (let round = 0; round <= 1; round++) {
-        await this.assertAffordable(route, attempt, request.tier);
+        const reservationId = await this.assertAffordable(route, attempt, request.tier);
 
         let response: AiCompletionResponse;
         try {
@@ -257,6 +266,7 @@ export class AiRouter {
             ok: false,
             error: safeErrorText(e, 300),
             at: this.clock.now(),
+            reservationId,
           });
           throw e;
         }
@@ -277,6 +287,7 @@ export class AiRouter {
           schemaRetries,
           ok: true,
           at: this.clock.now(),
+          reservationId,
         });
 
         const verdict = request.validate ? request.validate(response.parsed) : ({ ok: true } as const);
@@ -450,7 +461,7 @@ export class AiRouter {
     route: { provider: AiProvider; model: string; price: { inputCostPerMTok: number; outputCostPerMTok: number } },
     request: AiCompletionRequest,
     tier: AiTier,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const inputTokens = estimateInputTokens(request);
     const price = route.price.inputCostPerMTok > 0 || route.price.outputCostPerMTok > 0 ? route.price : FALLBACK_PRICE;
     const usdEstimate =
@@ -482,6 +493,8 @@ export class AiRouter {
         },
       );
     }
+
+    return verdict.reservationId;
   }
 
   private async record(record: AiUsageRecord): Promise<void> {

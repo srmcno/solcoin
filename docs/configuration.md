@@ -467,13 +467,15 @@ at all despite being a valid enum value.
 `customRssFeeds` (the RSS provider) are read through closures on every use and
 therefore apply immediately. `googleTrendsRegions`, `mastodonInstances` and
 `customSubreddits` are snapshotted when the provider registry is built, and the
-registry is rebuilt only at boot and whenever a secret is stored or deleted
-(`PUT`/`DELETE /api/system/secrets/:key`). Until one of those happens, editing
-them changes the stored settings and nothing else. The same applies to
-`ai.imageModel`, and to `execution.network`, which selects the RPC endpoints and
-launch adapters at registry-build time — switch the network and the matching
-adapter does not exist until the next rebuild, so a launch fails with
-`not_configured`. Restarting is the reliable way to apply any of these.
+registry is rebuilt only at boot, whenever a secret is stored or deleted
+(`PUT`/`DELETE /api/system/secrets/:key`), and whenever `execution.network`
+changes. Until one of those happens, editing them changes the stored settings
+and nothing else; the same applies to `ai.imageModel`. Restarting is the
+reliable way to apply any of them.
+
+`execution.network` is the exception that rebuilds on its own, because the
+alternative is dangerous rather than merely inconvenient — see the
+`execution` section below.
 
 `discoveryIntervalMinutes` is read once more narrowly still: the scheduler takes
 it when it registers the `trend-discovery` job at boot and reschedules from that
@@ -584,10 +586,19 @@ cannot cancel the others.
 | `commitment` | `confirmed` | `processed`, `confirmed`, `finalized` | **Not consumed by any code path.** The RPC client is constructed with `confirmed` unconditionally. |
 
 `network: simulation` always routes to the simulation adapter regardless of the
-`adapter` setting. Changing `network` does not itself rebuild the RPC endpoints
-or the launch adapters — those are built from the network in effect at the last
-provider-registry build, so restart after switching networks (see *When a change
-takes effect*, above).
+`adapter` setting.
+
+Changing `network` rebuilds the RPC endpoints and the launch adapters as part of
+the update, so no restart is needed. That rebuild is not a convenience: the
+adapter's connection is fixed when it is constructed, and an adapter left
+pointed at the previous chain would broadcast to it while the launch record said
+otherwise — a devnet launch spending real mainnet SOL. Two things make that
+impossible rather than unlikely. The adapter declares only the network it is
+bound to, so a stale one is refused with *No launch adapter is available for the
+"…" network* rather than used; and the settings response carries
+`providersRebuilt: true`, or a `providerRefreshError` when the rebuild failed —
+in which case launching stays blocked until it succeeds. Check for that field
+after switching networks.
 
 ### Top level
 

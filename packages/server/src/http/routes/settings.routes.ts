@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import { z } from 'zod';
+import { safeErrorText } from '../../core/errors.js';
 import { isSensitiveSettingPath } from '@solcoin/shared';
 import { actorFrom, requirePermission } from '../server.js';
 import type { AppContainer } from '../../container.js';
@@ -41,10 +42,37 @@ export default async function settingsRoutes(
     }
 
     const result = container.settings.update(body.patch, actorFrom(request), body.reason);
+
+    /*
+     * The RPC connection and the launch adapter are built against whichever
+     * network was configured when they were constructed. Changing
+     * `execution.network` without rebuilding them leaves a live adapter still
+     * pointed at the previous chain, which is how a launch an operator
+     * believes is going to devnet ends up broadcast to mainnet.
+     *
+     * The adapter now declares only the network it is bound to, so a stale one
+     * is refused rather than used — but a refusal is a poor answer to a
+     * setting the operator just changed, so the providers are rebuilt here and
+     * the switch simply takes effect. A failure to rebuild is reported rather
+     * than swallowed: it leaves the platform unable to launch, and the
+     * operator needs to know that now rather than at the next launch.
+     */
+    const rebuilt = result.changed.some((c) => c.path === 'execution.network');
+    let providerRefreshError: string | null = null;
+    if (rebuilt) {
+      try {
+        await container.refreshProviders();
+      } catch (e) {
+        providerRefreshError = safeErrorText(e, 300);
+      }
+    }
+
     return {
       settings: result.settings,
       changed: result.changed,
       sensitiveChanges: result.changed.filter((c) => isSensitiveSettingPath(c.path)).map((c) => c.path),
+      ...(rebuilt ? { providersRebuilt: providerRefreshError === null } : {}),
+      ...(providerRefreshError ? { providerRefreshError } : {}),
     };
   });
 

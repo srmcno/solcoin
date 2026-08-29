@@ -86,6 +86,20 @@ export interface AppContainer {
   refreshProviders(): Promise<void>;
   /** Launch an already-approved candidate. */
   launchApproved(conceptId: string, actor: { actorId?: string; actorLabel?: string }): Promise<LaunchOutcome>;
+  /**
+   * Do the work a confirmed launch requires beyond its own row: mark the
+   * concept launched, register the token for monitoring, record the cost.
+   * The launch path calls it directly; recovery calls it for a launch that
+   * confirmed while nobody was watching. Safe to call more than once.
+   */
+  finaliseConfirmedLaunch(input: {
+    conceptId: string;
+    launchId: string;
+    mint: string;
+    network: string;
+    costLamports: number;
+    createdOnChainAt: number;
+  }): Promise<void>;
   /** Regenerate a fresh concept slate for a trend. */
   regenerateForTrend(trendId: string): Promise<GeneratedConcept[]>;
   /** Apply an operator edit to a candidate, re-running the safety screen. */
@@ -307,6 +321,63 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     return generated;
   }
 
+  /**
+   * Everything a confirmed launch needs beyond its own row.
+   *
+   * Marking a launch confirmed is not the end of it: the concept has to move
+   * to `launched`, the token has to be registered so the monitor starts
+   * polling it, and the SOL it cost has to be recorded. Miss that and a real
+   * token exists on chain that the platform has forgotten about — no market
+   * observations, no fee detection, no learning sample.
+   *
+   * Both the launch path and the crash-recovery path go through here, because
+   * a launch that had to be recovered is exactly the one most likely to be
+   * left half-finished. It is safe to call twice: registering a token is
+   * `ON CONFLICT DO NOTHING`, and the expense is skipped when one already
+   * refers to this launch.
+   */
+  async function finaliseConfirmedLaunch(input: {
+    conceptId: string;
+    launchId: string;
+    mint: string;
+    network: string;
+    costLamports: number;
+    createdOnChainAt: number;
+  }): Promise<void> {
+    const concept = await concepts.getById(input.conceptId);
+    concepts.setStatus(input.conceptId, 'launched');
+
+    monitoring.registerToken({
+      mint: input.mint,
+      launchId: input.launchId,
+      conceptId: input.conceptId,
+      trendId: (concept?.trend_id as string) ?? null,
+      network: input.network,
+      name: String(concept?.name ?? ''),
+      symbol: String(concept?.symbol ?? ''),
+      metadataUri: (concept?.metadata_uri as string) ?? null,
+      imageUri: (concept?.image_uri as string) ?? null,
+      creatorAddress: (await keystore.getPublicKey()) ?? 'simulated',
+      createdOnChainAt: input.createdOnChainAt,
+    });
+
+    const alreadyRecorded = db.$raw
+      .prepare(`SELECT 1 FROM expenses WHERE ref_type = 'launch' AND ref_id = ? LIMIT 1`)
+      .get(input.launchId);
+    if (!alreadyRecorded) {
+      await accounting
+        .recordExpense({
+          kind: 'launch_sol',
+          description: `Launch of ${String(concept?.symbol ?? input.mint.slice(0, 8))}`,
+          amountLamports: input.costLamports,
+          refType: 'launch',
+          refId: input.launchId,
+          incurredAt: input.createdOnChainAt,
+        })
+        .catch(() => undefined);
+    }
+  }
+
   async function refreshProviders(): Promise<void> {
     const config = settings.get();
     const network = config.execution.network;
@@ -408,6 +479,7 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     },
 
     refreshProviders,
+    finaliseConfirmedLaunch,
 
     async launchApproved(conceptId, actor) {
       const concept = await concepts.getById(conceptId);
@@ -415,12 +487,32 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
       const network = settings.get().execution.network;
       const balance = (await wallet.summary()).balanceLamports;
 
+      /*
+       * The prediction the pipeline made for this concept, carried onto the
+       * launch row.
+       *
+       * This is what closes the learning loop. `LearningService.recordOutcomes`
+       * only considers launches whose `prediction_id` is set — it has nothing
+       * to score an outcome against otherwise — so leaving it null meant every
+       * confirmed launch was skipped and the model never saw a single real
+       * result. The platform would have gone on reporting informed priors
+       * forever while appearing to learn.
+       */
+      const prediction = await predictions.getPrediction(conceptId);
+      const predictionId = prediction ? String(prediction.id) : undefined;
+      if (!predictionId) {
+        log.warn(
+          { conceptId },
+          'launching a concept with no stored prediction; its outcome cannot become a training sample',
+        );
+      }
+
       concepts.setStatus(conceptId, 'launching');
 
       const outcome = await launches.launch(
         {
           conceptId,
-          predictionId: undefined,
+          predictionId,
           name: String(concept.name),
           symbol: String(concept.symbol),
           description: String(concept.description ?? ''),
@@ -435,30 +527,14 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
       );
 
       if (outcome.status === 'confirmed' && outcome.mintAddress) {
-        concepts.setStatus(conceptId, 'launched');
-        monitoring.registerToken({
-          mint: outcome.mintAddress,
-          launchId: outcome.launchId,
+        await finaliseConfirmedLaunch({
           conceptId,
-          trendId: (concept.trend_id as string) ?? null,
+          launchId: outcome.launchId,
+          mint: outcome.mintAddress,
           network,
-          name: String(concept.name),
-          symbol: String(concept.symbol),
-          metadataUri: (concept.metadata_uri as string) ?? null,
-          imageUri: (concept.image_uri as string) ?? null,
-          creatorAddress: (await keystore.getPublicKey()) ?? 'simulated',
+          costLamports: outcome.costLamports ?? 0,
           createdOnChainAt: now(),
         });
-        await accounting
-          .recordExpense({
-            kind: 'launch_sol',
-            description: `Launch of ${String(concept.symbol)}`,
-            amountLamports: outcome.costLamports ?? 0,
-            refType: 'launch',
-            refId: outcome.launchId,
-            incurredAt: now(),
-          })
-          .catch(() => undefined);
       } else {
         concepts.setStatus(conceptId, outcome.status === 'blocked' ? 'approved' : 'failed', {
           reason: outcome.errorCode,

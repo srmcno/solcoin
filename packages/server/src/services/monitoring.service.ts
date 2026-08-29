@@ -209,26 +209,46 @@ export class MonitoringService {
      * already answers — and the analytics sum this column as total organic
      * volume, so anything that traded across more than one day was understated.
      *
-     * What can be derived honestly is an integral of the rate: treat the window
-     * as `volume24h` per 24 hours and add only the share of it that has elapsed
-     * since the observation this total was last advanced to. A token polled
-     * every ten minutes and one polled every six hours then accumulate
-     * comparably, and neither double-counts an overlap. On the first
-     * observation the whole window counts, which is correct for a token that
-     * is younger than the window and the best available estimate otherwise.
+     * Deriving a lifetime total from it takes two cases, because the window
+     * means different things either side of the token's first day.
      *
-     * It is an estimate. Irregular polling makes it a rough one, and no
-     * provider reports a true lifetime total to check it against.
+     * While the token is younger than the window, "the last 24 hours" is its
+     * entire life: the reported figure is cumulative, and what is new since the
+     * last observation is simply the increase. This is the case that matters
+     * most here, because short-lived tokens are most of them. Integrating a
+     * cumulative figure as though it were a rate is what a naive reading does,
+     * and it is badly wrong — for a token trading steadily and polled hourly it
+     * records about half the first day's real volume, and the shortfall
+     * compounds.
+     *
+     * Once the token is older than the window the figure really is a rate:
+     * `volume24h` per 24 hours. Adding the share of it that has elapsed since
+     * the last accounted observation means a token polled every ten minutes and
+     * one polled every six hours accumulate comparably, and neither
+     * double-counts the overlap between successive windows.
+     *
+     * It is still an estimate — no provider reports a true lifetime total, and
+     * a gap in polling is a gap in the evidence — but it tracks reality instead
+     * of drifting away from it.
      */
     const VOLUME_WINDOW_MS = 24 * 3_600_000;
-    const accountedAt = existing.volume_accounted_at === null || existing.volume_accounted_at === undefined
-      ? null
-      : Number(existing.volume_accounted_at);
+    const accountedAt =
+      existing.volume_accounted_at === null || existing.volume_accounted_at === undefined
+        ? null
+        : Number(existing.volume_accounted_at);
+    const tokenAgeMs = observedAt - Number(existing.created_on_chain_at ?? existing.created_at ?? observedAt);
+    const previouslyReported = Number(existing.volume_24h_sol ?? 0);
     let volumeAdded = 0;
     let volumeAccountedAt: number | null = null;
     if (data.volume24hSol !== undefined && Number.isFinite(data.volume24hSol)) {
-      const elapsed = accountedAt === null ? VOLUME_WINDOW_MS : Math.max(0, observedAt - accountedAt);
-      volumeAdded = data.volume24hSol * (Math.min(elapsed, VOLUME_WINDOW_MS) / VOLUME_WINDOW_MS);
+      if (tokenAgeMs < VOLUME_WINDOW_MS) {
+        // Cumulative since launch: take the increase. A provider revising a
+        // figure downwards contributes nothing rather than a negative.
+        volumeAdded = Math.max(0, data.volume24hSol - previouslyReported);
+      } else {
+        const elapsed = accountedAt === null ? VOLUME_WINDOW_MS : Math.max(0, observedAt - accountedAt);
+        volumeAdded = data.volume24hSol * (Math.min(elapsed, VOLUME_WINDOW_MS) / VOLUME_WINDOW_MS);
+      }
       volumeAccountedAt = observedAt;
     }
 

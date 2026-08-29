@@ -238,9 +238,13 @@ describe('events', () => {
 describe('cumulative volume', () => {
   /**
    * Providers report a rolling 24-hour window. A lifetime total has to be
-   * integrated from those windows; recording the largest one ever seen is the
-   * peak day, which `peak_volume_24h_sol` already answers, and the analytics
-   * sum this column as total organic volume.
+   * derived from those windows, and the window means two different things
+   * either side of the token's first day: while the token is younger than the
+   * window it is cumulative since launch, and after that it is a rate.
+   *
+   * Recording the largest window ever seen is neither — it is the peak day,
+   * which `peak_volume_24h_sol` already answers, while the analytics sum this
+   * column as total organic volume.
    */
   function totals(mint: string): { total: number; peak: number } {
     const row = harness.db.$raw
@@ -249,59 +253,109 @@ describe('cumulative volume', () => {
     return { total: row.volume_total_sol, peak: row.peak_volume_24h_sol };
   }
 
-  it('counts the whole window on the first observation', () => {
-    register('mint_vol_first');
-    observe('mint_vol_first', { volume24hSol: 40, holders: 12, txCount24h: 90 });
-    expect(totals('mint_vol_first').total).toBeCloseTo(40, 6);
-  });
+  describe('while the token is younger than the window', () => {
+    it('counts everything the first observation reports', () => {
+      register('mint_vol_first');
+      observe('mint_vol_first', { volume24hSol: 40, holders: 12, txCount24h: 90 });
+      expect(totals('mint_vol_first').total).toBeCloseTo(40, 6);
+    });
 
-  it('accumulates across days rather than keeping the best one', () => {
-    register('mint_vol_days');
-    // Three days at a steady 40 SOL/day is 120 SOL of trading, not 40.
-    observe('mint_vol_days', { volume24hSol: 40, holders: 12, txCount24h: 90 });
-    harness.clock.advance(24 * HOUR);
-    observe('mint_vol_days', { volume24hSol: 40, holders: 20, txCount24h: 180 });
-    harness.clock.advance(24 * HOUR);
-    observe('mint_vol_days', { volume24hSol: 40, holders: 26, txCount24h: 240 });
+    it('follows a cumulative figure rather than integrating it as a rate', () => {
+      register('mint_vol_young');
+      // A token launched an hour ago trading a steady 1 SOL/hour. Its reported
+      // "last 24 hours" is its whole life, so it climbs 1, 2, 3...
+      let traded = 0;
+      for (let hour = 1; hour <= 12; hour++) {
+        traded = hour;
+        observe('mint_vol_young', { volume24hSol: traded, holders: hour, txCount24h: hour * 10 });
+        harness.clock.advance(1 * HOUR);
+      }
+      // Treating that cumulative figure as a rate records roughly half of it.
+      expect(totals('mint_vol_young').total).toBeCloseTo(12, 4);
+    });
 
-    const { total, peak } = totals('mint_vol_days');
-    expect(total).toBeCloseTo(120, 4);
-    // The best single day is a separate question and still answered.
-    expect(peak).toBeCloseTo(40, 6);
-  });
+    it('adds nothing when a young token reports the same figure again', () => {
+      register('mint_vol_flat');
+      observe('mint_vol_flat', { volume24hSol: 24, holders: 9, txCount24h: 50 });
+      for (let i = 0; i < 6; i++) {
+        harness.clock.advance(1 * HOUR);
+        // Cumulative and unchanged means nothing new traded.
+        observe('mint_vol_flat', { volume24hSol: 24, holders: 9, txCount24h: 50 });
+      }
+      expect(totals('mint_vol_flat').total).toBeCloseTo(24, 4);
+    });
 
-  it('does not double-count overlapping windows when polling is frequent', () => {
-    register('mint_vol_overlap');
-    observe('mint_vol_overlap', { volume24hSol: 24, holders: 9, txCount24h: 50 });
-    // Six more polls an hour apart, each still reporting the same 24h window.
-    for (let i = 0; i < 6; i++) {
+    it('ignores a figure revised downwards rather than subtracting', () => {
+      register('mint_vol_revised');
+      observe('mint_vol_revised', { volume24hSol: 30, holders: 8, txCount24h: 40 });
       harness.clock.advance(1 * HOUR);
+      observe('mint_vol_revised', { volume24hSol: 25, holders: 8, txCount24h: 40 });
+      expect(totals('mint_vol_revised').total).toBeCloseTo(30, 4);
+    });
+  });
+
+  describe('once the token is older than the window', () => {
+    it('accumulates across days rather than keeping the best one', () => {
+      // Two days old already, so every observation is a genuine rolling window.
+      register('mint_vol_days', 48);
+      observe('mint_vol_days', { volume24hSol: 40, holders: 12, txCount24h: 90 });
+      harness.clock.advance(24 * HOUR);
+      observe('mint_vol_days', { volume24hSol: 40, holders: 20, txCount24h: 180 });
+      harness.clock.advance(24 * HOUR);
+      observe('mint_vol_days', { volume24hSol: 40, holders: 26, txCount24h: 240 });
+
+      const { total, peak } = totals('mint_vol_days');
+      expect(total).toBeCloseTo(120, 4);
+      // The best single day is a separate question and still answered.
+      expect(peak).toBeCloseTo(40, 6);
+    });
+
+    it('does not double-count the overlap between successive windows', () => {
+      register('mint_vol_overlap', 48);
       observe('mint_vol_overlap', { volume24hSol: 24, holders: 9, txCount24h: 50 });
+      // Six more polls an hour apart, each reporting the same rolling window.
+      for (let i = 0; i < 6; i++) {
+        harness.clock.advance(1 * HOUR);
+        observe('mint_vol_overlap', { volume24hSol: 24, holders: 9, txCount24h: 50 });
+      }
+      // The first window, then six hours of it: 24 + 6 × (24/24) = 30.
+      expect(totals('mint_vol_overlap').total).toBeCloseTo(30, 4);
+    });
+
+    it('does not lose elapsed time to an observation that carries no volume', () => {
+      register('mint_vol_gap', 48);
+      observe('mint_vol_gap', { volume24hSol: 24, holders: 5, txCount24h: 30 });
+      harness.clock.advance(6 * HOUR);
+      // A provider that answered without a volume figure must not advance the
+      // accounting marker, or those six hours would be silently dropped.
+      observe('mint_vol_gap', { holders: 6 });
+      harness.clock.advance(6 * HOUR);
+      observe('mint_vol_gap', { volume24hSol: 24, holders: 7, txCount24h: 60 });
+
+      // 24 for the first window, then twelve hours of it: 24 + 12 = 36.
+      expect(totals('mint_vol_gap').total).toBeCloseTo(36, 4);
+    });
+
+    it('never counts more than the window actually reported', () => {
+      register('mint_vol_cap', 48);
+      observe('mint_vol_cap', { volume24hSol: 10, holders: 4, txCount24h: 20 });
+      harness.clock.advance(10 * 24 * HOUR);
+      // Ten days later the window still only evidences 10 SOL, not 100.
+      observe('mint_vol_cap', { volume24hSol: 10, holders: 4, txCount24h: 20 });
+      expect(totals('mint_vol_cap').total).toBeCloseTo(20, 4);
+    });
+  });
+
+  it('carries a young token across the window boundary without a discontinuity', () => {
+    register('mint_vol_cross');
+    // Steady 1 SOL/hour from launch, observed every hour for 30 hours. The
+    // cumulative reading saturates at 24 once the window stops covering the
+    // token's whole life, and the rate branch takes over from there.
+    for (let hour = 1; hour <= 30; hour++) {
+      observe('mint_vol_cross', { volume24hSol: Math.min(hour, 24), holders: hour, txCount24h: hour * 5 });
+      harness.clock.advance(1 * HOUR);
     }
-    // The first window plus six hours of it: 24 + 6 × (24/24) = 30.
-    expect(totals('mint_vol_overlap').total).toBeCloseTo(30, 4);
-  });
-
-  it('does not lose elapsed time to an observation that carries no volume', () => {
-    register('mint_vol_gap');
-    observe('mint_vol_gap', { volume24hSol: 24, holders: 5, txCount24h: 30 });
-    harness.clock.advance(6 * HOUR);
-    // A provider that answered without a volume figure must not advance the
-    // accounting marker, or those six hours would be silently dropped.
-    observe('mint_vol_gap', { holders: 6 });
-    harness.clock.advance(6 * HOUR);
-    observe('mint_vol_gap', { volume24hSol: 24, holders: 7, txCount24h: 60 });
-
-    // 24 for the first window, then twelve hours of it: 24 + 12 = 36.
-    expect(totals('mint_vol_gap').total).toBeCloseTo(36, 4);
-  });
-
-  it('never counts more than the window actually reported', () => {
-    register('mint_vol_cap');
-    observe('mint_vol_cap', { volume24hSol: 10, holders: 4, txCount24h: 20 });
-    harness.clock.advance(10 * 24 * HOUR);
-    // Ten days later the window still only evidences 10 SOL of trading, not 100.
-    observe('mint_vol_cap', { volume24hSol: 10, holders: 4, txCount24h: 20 });
-    expect(totals('mint_vol_cap').total).toBeCloseTo(20, 4);
+    // 30 hours at 1 SOL/hour is 30 SOL, and that is what should be recorded.
+    expect(totals('mint_vol_cross').total).toBeCloseTo(30, 3);
   });
 });

@@ -215,6 +215,31 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
             }
             return ageMs > 10 * TIME.minute ? 'expired' : 'unknown';
           });
+          if (outcome === 'confirmed') {
+            /*
+             * A launch that confirmed while nobody was watching still needs
+             * everything the normal path does after confirmation. Without this
+             * the recovered token is a real token on chain that nothing
+             * monitors: no market observations, no fee detection, and no
+             * learning sample — the crash would silently cost the platform the
+             * launch it just paid for.
+             */
+            await container
+              .finaliseConfirmedLaunch({
+                conceptId: String(row.concept_id),
+                launchId: String(row.id),
+                mint: String(row.mint_address),
+                network: String(row.network),
+                costLamports: Number(row.total_cost_lamports ?? 0),
+                createdOnChainAt: Number(row.confirmed_at ?? container.clock.now()),
+              })
+              .catch((e: unknown) => {
+                log.error(
+                  { launchId: String(row.id), err: safeErrorText(e, 200) },
+                  'a recovered launch confirmed but could not be finalised; the token is not being monitored',
+                );
+              });
+          }
           if (outcome !== 'pending') resolved++;
         }
         return { itemsProcessed: resolved };
@@ -497,6 +522,17 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
 
         container.db.$raw.prepare('DELETE FROM ai_cache WHERE expires_at < ?').run(container.clock.now());
         container.db.$raw.prepare('DELETE FROM idempotency_keys WHERE expires_at < ?').run(container.clock.now());
+
+        /*
+         * An AI spend reservation whose call never came back to reconcile it.
+         * The row holds a worst-case estimate, so leaving it counts spend that
+         * never happened against the daily budget. An hour is far longer than
+         * any provider call, so anything still marked reserved after that is a
+         * process that died mid-flight rather than a call in progress.
+         */
+        const staleReservations = container.db.$raw
+          .prepare(`DELETE FROM ai_requests WHERE error_code = 'reserved' AND created_at < ?`)
+          .run(container.clock.now() - TIME.hour).changes;
         // Keep the operational log bounded; the audit log is never pruned.
         container.db.$raw
           .prepare('DELETE FROM system_events WHERE created_at < ?')
@@ -518,8 +554,8 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
         container.db.$raw.pragma('wal_checkpoint(PASSIVE)');
 
         return {
-          itemsProcessed: expired + pruned.archived + sessions,
-          result: { expiredConcepts: expired, ...pruned, prunedSessions: sessions },
+          itemsProcessed: expired + pruned.archived + sessions + staleReservations,
+          result: { expiredConcepts: expired, ...pruned, prunedSessions: sessions, staleReservations },
         };
       },
     },

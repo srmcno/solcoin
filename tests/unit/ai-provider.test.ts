@@ -228,3 +228,114 @@ describe('helpers', () => {
     expect(extractJsonObject('nothing here')).toBeNull();
   });
 });
+
+describe('budget reservations', () => {
+  /**
+   * The router runs calls concurrently. If each one reads the historical spend,
+   * makes its call, and only then records the cost, then near the cap every
+   * concurrent call is approved and their combined cost clears a budget none of
+   * them individually exceeded.
+   */
+  function budgetHarness(cap: number) {
+    const rows: Array<{ id: string; cost: number; reserved: boolean }> = [];
+    let seq = 0;
+    return {
+      rows,
+      /** The pre-fix shape: read, decide, and leave recording to the caller. */
+      canSpendUnreserved: async (estimate: number) => {
+        const spent = rows.reduce((t, r) => t + r.cost, 0);
+        return spent + estimate > cap ? { allowed: false } : { allowed: true };
+      },
+      /** The fixed shape: decide and reserve without yielding in between. */
+      canSpend: async (estimate: number) => {
+        const spent = rows.reduce((t, r) => t + r.cost, 0);
+        if (spent + estimate > cap) return { allowed: false as const };
+        const id = `air_${++seq}`;
+        rows.push({ id, cost: estimate, reserved: true });
+        return { allowed: true as const, reservationId: id };
+      },
+      record: (cost: number, reservationId?: string) => {
+        const existing = reservationId && rows.find((r) => r.id === reservationId && r.reserved);
+        if (existing) {
+          existing.cost = cost;
+          existing.reserved = false;
+          return;
+        }
+        rows.push({ id: `air_${++seq}`, cost, reserved: false });
+      },
+      total: () => rows.reduce((t, r) => t + r.cost, 0),
+    };
+  }
+
+  it('lets concurrent calls exceed a cap when nothing is reserved up front', async () => {
+    const h = budgetHarness(1);
+    const call = async () => {
+      const verdict = await h.canSpendUnreserved(0.6);
+      if (!verdict.allowed) return 'refused';
+      await Promise.resolve(); // the provider call
+      h.record(0.6);
+      return 'spent';
+    };
+    const outcomes = await Promise.all([call(), call()]);
+    expect(outcomes.filter((o) => o === 'spent')).toHaveLength(2);
+    expect(h.total()).toBeCloseTo(1.2, 6); // over a cap of 1
+  });
+
+  it('holds the cap when the estimate is reserved with the decision', async () => {
+    const h = budgetHarness(1);
+    const call = async () => {
+      const verdict = await h.canSpend(0.6);
+      if (!verdict.allowed) return 'refused';
+      await Promise.resolve();
+      h.record(0.6, verdict.reservationId);
+      return 'spent';
+    };
+    const outcomes = await Promise.all([call(), call()]);
+    expect(outcomes.filter((o) => o === 'spent')).toHaveLength(1);
+    expect(outcomes.filter((o) => o === 'refused')).toHaveLength(1);
+    expect(h.total()).toBeCloseTo(0.6, 6);
+  });
+
+  it('reconciles the estimate down to what the call actually cost', async () => {
+    const h = budgetHarness(10);
+    const verdict = await h.canSpend(0.5); // worst case: every output token used
+    expect(h.total()).toBeCloseTo(0.5, 6);
+    h.record(0.02, verdict.reservationId); // what it really cost
+    expect(h.total()).toBeCloseTo(0.02, 6);
+    expect(h.rows).toHaveLength(1); // reconciled, not charged twice
+  });
+});
+
+describe('router budget threading', () => {
+  it('passes the reservation from the budget gate to the usage record', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const provider = createAnthropicProvider({
+      getCredential: async () => 'sk-test',
+      http: fakeHttp(() => ({
+        model: 'claude-haiku-4-5',
+        content: [{ type: 'text', text: 'hello' }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      })),
+    });
+    const router = new AiRouter({
+      providers: [provider],
+      settings: () => ({
+        triageModel: 'claude-haiku-4-5',
+        generationModel: 'claude-haiku-4-5',
+        decisionModel: 'claude-haiku-4-5',
+        maxOutputTokens: 512,
+        cacheTtlMinutes: 0,
+        maxConcurrentRequests: 2,
+      }),
+      canSpend: async () => ({ allowed: true, reservationId: 'air_reserved_1' }),
+      recordUsage: async (r) => {
+        seen.push(r as unknown as Record<string, unknown>);
+      },
+    });
+
+    await router.complete({ tier: 'triage', system: 's', messages: [{ role: 'user', content: 'hi' }], purpose: 'p' });
+    // Without this the reservation is never reconciled and the estimate stands
+    // as the recorded spend for the rest of the day.
+    expect(seen.at(-1)?.reservationId).toBe('air_reserved_1');
+  });
+});
