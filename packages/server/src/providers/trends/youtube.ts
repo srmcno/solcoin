@@ -235,8 +235,8 @@ export function createYouTubeProvider(deps: YouTubeProviderDeps): TrendProvider 
 
       rollDay();
       const remaining = unitsRemaining();
-      const searchLeft = searchCallsRemaining();
-      const quota = { quotaRemaining: remaining, quotaResetAt: quotaResetAt() };
+      // Read after the probe below, so the unit it spends is reflected.
+      const quota = () => ({ quotaRemaining: unitsRemaining(), quotaResetAt: quotaResetAt() });
 
       if (remaining < VIDEOS_LIST_UNIT_COST) {
         // Probing with no budget left would itself be the thing that breaks the
@@ -246,7 +246,7 @@ export function createYouTubeProvider(deps: YouTubeProviderDeps): TrendProvider 
           state: 'degraded',
           detail: `Daily quota exhausted (${ledger.units}/${DAILY_UNIT_BUDGET} units); resets at 00:00 UTC.`,
           setupHint,
-          ...quota,
+          ...quota(),
           ...(stats.lastSuccessAt !== undefined ? { lastSuccessAt: stats.lastSuccessAt } : {}),
           ...(stats.lastFailureAt !== undefined ? { lastFailureAt: stats.lastFailureAt } : {}),
         };
@@ -259,6 +259,7 @@ export function createYouTubeProvider(deps: YouTubeProviderDeps): TrendProvider 
         // not per result), which is why the cache TTL matters.
         const payload = await mostPopular(key, probeRegion, 1);
         const items = readItems(payload);
+        const searchLeft = searchCallsRemaining();
         return {
           ...base,
           state: items.length > 0 ? 'ok' : 'degraded',
@@ -268,7 +269,7 @@ export function createYouTubeProvider(deps: YouTubeProviderDeps): TrendProvider 
               : `Chart for ${probeRegion} responded but returned no videos.`,
           setupHint,
           latencyMs: clock.now() - started,
-          ...quota,
+          ...quota(),
           lastSuccessAt: clock.now(),
           ...(stats.lastFailureAt !== undefined ? { lastFailureAt: stats.lastFailureAt } : {}),
         };
@@ -283,7 +284,7 @@ export function createYouTubeProvider(deps: YouTubeProviderDeps): TrendProvider 
           detail: reason ? `${reason}: ${safeErrorText(e, 160)}` : safeErrorText(e, 200),
           setupHint,
           latencyMs: clock.now() - started,
-          ...quota,
+          ...quota(),
           ...(stats.lastSuccessAt !== undefined ? { lastSuccessAt: stats.lastSuccessAt } : {}),
           lastFailureAt: clock.now(),
         };
