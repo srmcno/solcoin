@@ -385,12 +385,15 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
 
     {
       name: 'wallet-reconcile',
-      description: 'Refreshes wallet balances and sweeps surplus revenue to the treasury.',
+      description: 'Refreshes wallet balances, resolves stranded outgoing transactions, and sweeps surplus revenue to the treasury.',
       intervalSeconds: 600,
       hasSideEffects: false,
       timeoutSeconds: 120,
       run: async () => {
         const balances = await container.wallet.refreshBalances();
+        // The job is named for this and did not do it: a transaction left
+        // `pending` by a process that died was never touched again.
+        const pending = await container.wallet.reconcilePending();
         const settings = container.settings.get();
 
         if (settings.wallet.autoSweepEnabled && settings.autonomy.wallet_transfer === 'auto') {
@@ -407,7 +410,10 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
           }
         }
 
-        return { itemsProcessed: 1, result: { operating: balances.operating, treasury: balances.treasury } };
+        return {
+          itemsProcessed: 1 + pending.confirmed + pending.failed + pending.voided,
+          result: { operating: balances.operating, treasury: balances.treasury, pending },
+        };
       },
     },
 

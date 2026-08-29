@@ -494,7 +494,7 @@ two fields behave very differently and the difference matters:
 | `token-lifecycle` | 3600 s | 10800 s (derived) | no | — | Marks quiet tokens dormant so monitoring effort follows attention. |
 | `fee-detect` | 600 s | 120 s | no | — | Reads the on-chain creator-fee vaults and records accrual snapshots. In simulation it also accrues simulated fees from simulated volume. |
 | `fee-collect` | 3600 s | 180 s | yes | `autonomy.fee_collection === 'auto'` | Claims accrued creator fees when `decideCollection` says it is economically worth the transaction. |
-| `wallet-reconcile` | 600 s | 120 s | **no** (see the note below) | — | Refreshes wallet balances; **and** sweeps surplus to treasury when `wallet.autoSweepEnabled` *and* `autonomy.wallet_transfer === 'auto'` (both off by default). |
+| `wallet-reconcile` | 600 s | 120 s | **no** (see the note below) | — | Refreshes wallet balances; resolves outgoing transactions left `pending` by a process that died — signed ones against the chain, fee-claim reservations by voiding them, and unsigned transfers not at all, since their outcome is genuinely unknown and guessing would be a lie; **and** sweeps surplus to treasury when `wallet.autoSweepEnabled` *and* `autonomy.wallet_transfer === 'auto'` (both off by default). |
 | `learning-outcomes` | 3600 s | 300 s | no | — | Measures realised outcomes against stored predictions at 24 h, 72 h and 168 h. |
 | `model-train` | 21600 s (6 h) | 600 s | no | — | Folds new outcomes into the success model, if they improve it. |
 | `analytics-rollup` | 3600 s | 180 s | no | — | Recomputes today's row in `daily_metrics` so analytics queries stay fast. |

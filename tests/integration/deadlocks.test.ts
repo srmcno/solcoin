@@ -4,6 +4,7 @@ import { createHarness, type TestHarness } from '../helpers.js';
 import { LaunchService } from '../../packages/server/src/services/launch.service.js';
 import { SimulationLaunchAdapter } from '../../packages/server/src/providers/solana/simulation-adapter.js';
 import type { LaunchAdapter } from '../../packages/server/src/providers/solana/launch-adapter.js';
+import { WalletService } from '../../packages/server/src/services/wallet.service.js';
 
 /**
  * States the platform could get into and never get out of.
@@ -173,5 +174,101 @@ describe('retrying a failed launch', () => {
     // Retiring a submitted launch would let a second token be minted for a
     // transaction that may still land.
     expect(service().retireFailed('cpt_live', 'simulation')).toBe(0);
+  });
+});
+
+describe('outgoing transactions left pending', () => {
+  /**
+   * A wallet transaction row is written before the transaction is sent and
+   * updated after. A process that dies in between strands one: it shows on the
+   * wallet page as an outgoing transfer that is neither confirmed nor failed,
+   * forever, because nothing else ever looked at it.
+   */
+  const HOUR = 3_600_000;
+
+  function seedPending(id: string, purpose: string, signature: string | null, ageMs: number): void {
+    harness.db.$raw
+      .prepare(
+        `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports, fee_lamports,
+                                          counterparty, status, signature, occurred_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(id, 'Wallet1111', 'devnet', 'out', purpose, 100_000, 5_000, 'Dest1111', 'pending', signature, harness.clock.now() - ageMs, harness.clock.now() - ageMs);
+  }
+
+  function statusOf(id: string): { status: string; fee_lamports: number } {
+    return harness.db.$raw.prepare('SELECT status, fee_lamports FROM wallet_transactions WHERE id = ?').get(id) as {
+      status: string;
+      fee_lamports: number;
+    };
+  }
+
+  /** A wallet with no RPC: the case a fresh or simulated install is in. */
+  function walletService() {
+    return new WalletService(
+      harness.db,
+      harness.settings,
+      harness.guard,
+      harness.audit,
+      harness.events,
+      { getPublicKey: async () => null, getRecord: async () => null } as never,
+      null,
+      () => harness.clock.now(),
+    );
+  }
+
+  it('voids a fee-claim reservation whose claim never reported', async () => {
+    seedPending('wtx_res', 'fee_claim', null, 2 * HOUR);
+    const result = await walletService().reconcilePending();
+
+    expect(result.voided).toBe(1);
+    const row = statusOf('wtx_res');
+    expect(row.status).toBe('failed');
+    // The allowance it was holding is released with it.
+    expect(row.fee_lamports).toBe(0);
+  });
+
+  it('leaves a transfer whose outcome is genuinely unknown alone', async () => {
+    // No signature means the send never reported back — but it may still have
+    // been broadcast in the instant before the process died. Marking it either
+    // way would be a guess presented as a fact.
+    seedPending('wtx_unknown', 'manual_transfer', null, 2 * HOUR);
+    const result = await walletService().reconcilePending();
+
+    expect(result.unknown).toBe(1);
+    expect(statusOf('wtx_unknown').status).toBe('pending');
+  });
+
+  it('does not touch a transaction that is merely recent', async () => {
+    seedPending('wtx_recent', 'fee_claim', null, 60_000);
+    const result = await walletService().reconcilePending();
+    expect(result).toEqual({ confirmed: 0, failed: 0, voided: 0, unknown: 0 });
+    expect(statusOf('wtx_recent').status).toBe('pending');
+  });
+
+  it('resolves a signed transaction against the chain', async () => {
+    seedPending('wtx_landed', 'manual_transfer', 'Sig-landed', 2 * HOUR);
+    seedPending('wtx_reverted', 'manual_transfer', 'Sig-reverted', 2 * HOUR);
+
+    const rpc = {
+      getSignatureStatus: async (signature: string) =>
+        signature === 'Sig-landed' ? { err: null } : { err: { InstructionError: [0, 'Custom'] } },
+    };
+    const wallet = new WalletService(
+      harness.db,
+      harness.settings,
+      harness.guard,
+      harness.audit,
+      harness.events,
+      { getPublicKey: async () => null, getRecord: async () => null } as never,
+      rpc as never,
+      () => harness.clock.now(),
+    );
+
+    const result = await wallet.reconcilePending();
+    expect(result.confirmed).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(statusOf('wtx_landed').status).toBe('confirmed');
+    expect(statusOf('wtx_reverted').status).toBe('failed');
   });
 });

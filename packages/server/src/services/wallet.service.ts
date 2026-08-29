@@ -107,6 +107,92 @@ export class WalletService {
   }
 
   /** Refresh balances from chain and persist them. */
+  /**
+   * Resolve outgoing transactions that were left `pending`.
+   *
+   * A row is written before the transaction is sent and updated after, so a
+   * process that dies in between leaves one stranded. Nothing else ever touches
+   * it: it stays pending forever, showing on the wallet page as an outgoing
+   * transfer that is neither confirmed nor failed. The job that should fix this
+   * is called `wallet-reconcile` and, until now, only refreshed balances.
+   *
+   * Three cases, deliberately distinct:
+   *
+   *  - A row with a signature can be resolved against the chain, which is the
+   *    only authority on whether it landed.
+   *  - A fee-claim reservation with no signature never got as far as sending.
+   *    It exists to hold spending allowance while a claim runs, and the claim
+   *    itself is recorded in `creator_fee_events`, so voiding an old one loses
+   *    nothing and frees the allowance it is holding.
+   *  - A transfer with no signature is genuinely unknown: it may have been
+   *    broadcast in the instant before the process died. Guessing either way
+   *    would be a lie, so it is counted and reported rather than resolved.
+   */
+  async reconcilePending(options: { olderThanMs?: number } = {}): Promise<{
+    confirmed: number;
+    failed: number;
+    voided: number;
+    unknown: number;
+  }> {
+    const cutoff = this.now() - (options.olderThanMs ?? 10 * 60_000);
+    const rows = this.db.$raw
+      .prepare(
+        `SELECT id, signature, purpose FROM wallet_transactions
+          WHERE direction = 'out' AND status = 'pending' AND occurred_at < ?
+          ORDER BY occurred_at ASC LIMIT 100`,
+      )
+      .all(cutoff) as Array<{ id: string; signature: string | null; purpose: string }>;
+
+    const result = { confirmed: 0, failed: 0, voided: 0, unknown: 0 };
+
+    for (const row of rows) {
+      if (!row.signature) {
+        if (row.purpose === 'fee_claim') {
+          this.db.$raw
+            .prepare(
+              `UPDATE wallet_transactions
+                  SET status = 'failed', fee_lamports = 0,
+                      error = 'Spending reservation for a fee claim that never reported an outcome.'
+                WHERE id = ?`,
+            )
+            .run(row.id);
+          result.voided++;
+        } else {
+          result.unknown++;
+        }
+        continue;
+      }
+
+      if (!this.rpc) {
+        result.unknown++;
+        continue;
+      }
+
+      const status = await this.rpc.getSignatureStatus(row.signature).catch(() => null);
+      if (!status) {
+        result.unknown++;
+        continue;
+      }
+      if (status.err) {
+        this.db.$raw
+          .prepare(`UPDATE wallet_transactions SET status = 'failed', error = ? WHERE id = ?`)
+          .run('The transaction was found on chain and had failed.', row.id);
+        result.failed++;
+      } else {
+        this.db.$raw.prepare(`UPDATE wallet_transactions SET status = 'confirmed' WHERE id = ?`).run(row.id);
+        result.confirmed++;
+      }
+    }
+
+    if (result.unknown > 0) {
+      this.log.warn(
+        { unknown: result.unknown },
+        'outgoing transactions whose outcome cannot be determined; they are left pending rather than guessed at',
+      );
+    }
+    return result;
+  }
+
   async refreshBalances(): Promise<{ operating: number | null; treasury: number | null }> {
     const config = this.settings.get();
     const network = config.execution.network;
