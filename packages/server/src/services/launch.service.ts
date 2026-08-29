@@ -184,8 +184,8 @@ export class LaunchService {
           this.db.$raw
             .prepare(
               `INSERT INTO launches (id, concept_id, prediction_id, idempotency_key, network, adapter, status,
-                                     approval_mode, initiated_by, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                                     approval_mode, initiated_by, total_cost_lamports, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
             )
             .run(
               launchId,
@@ -197,6 +197,18 @@ export class LaunchService {
               'preparing',
               input.approvalMode,
               input.initiatedBy ?? null,
+              /*
+               * The reservation has to carry its own cost, not the zero
+               * default. `spentLamportsSince` sums `total_cost_lamports` over
+               * live launch rows, so a reservation recorded as free is
+               * invisible to the SOL caps for as long as adapter preparation
+               * takes — and with more than one launch permitted per hour, a
+               * second request arriving in that window would clear the cap on
+               * the strength of the first one's spend not being counted. The
+               * value is reconciled to the planned cost once the adapter has
+               * planned, and to the actual cost on confirmation.
+               */
+              this.guard.estimatedLaunchCostLamports(),
               this.now(),
               this.now(),
             );
@@ -601,6 +613,38 @@ export class LaunchService {
   }
 
   /**
+   * Put a concept back in front of an operator after recovery failed its launch.
+   *
+   * `launching` is a transient status set by the caller immediately before the
+   * launch and restored when it returns. A process that dies mid-launch never
+   * restores it, and until now nothing else would: the recovery job resolved
+   * the orphaned launch row and stopped there, while the launch queue selects
+   * only `approved`, the expiry sweep skips `launching` on purpose, and
+   * `restoreStrandedCandidates` skips any concept that has a launch row. The
+   * candidate stayed invisible and unlaunchable for good.
+   *
+   * Conditional on the concept still being `launching`, so a concept that has
+   * since been finalised or relaunched is never clobbered by a late pass.
+   */
+  private releaseStrandedConcept(row: Record<string, unknown>): void {
+    const conceptId = row.concept_id === null || row.concept_id === undefined ? null : String(row.concept_id);
+    if (!conceptId) return;
+    const changes = this.db.$raw
+      .prepare(
+        `UPDATE concepts
+            SET status = 'failed',
+                rejection_reason = 'launch_unresolved',
+                rejection_detail = 'The launch was recovered as failed after the process lost track of it. Retry if the trend is still moving.',
+                updated_at = ?
+          WHERE id = ? AND status = 'launching'`,
+      )
+      .run(this.now(), conceptId).changes;
+    if (changes > 0) {
+      this.log.info({ conceptId, launchId: String(row.id) }, 'released a concept stranded in launching by a recovered failure');
+    }
+  }
+
+  /**
    * Restore candidates stranded in `launching` with nothing behind them.
    *
    * `launchApproved` marks the concept `launching` before it claims the launch
@@ -649,6 +693,7 @@ export class LaunchService {
     if (!mint) {
       // Never broadcast anything: safe to fail so it can be retried cleanly.
       this.recordFailure(launchId, 'internal', 'Launch was abandoned before a mint address was assigned.');
+      this.releaseStrandedConcept(row);
       return 'failed';
     }
 
@@ -667,6 +712,7 @@ export class LaunchService {
     }
     if (state === 'expired') {
       this.recordFailure(launchId, 'transaction_expired', 'The launch transaction expired without landing on chain.');
+      this.releaseStrandedConcept(row);
       this.events.emit('launch.failed', {
         launchId,
         error: 'Transaction expired without landing.',

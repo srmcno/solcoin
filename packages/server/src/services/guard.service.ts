@@ -188,7 +188,7 @@ export class GuardService {
 
     const base = this.checkSpend({
       operation: 'launch',
-      lamports: solToLamports(config.execution.devBuySol) + 6_000_000,
+      lamports: this.estimatedLaunchCostLamports(),
       walletBalanceLamports,
     });
     if (!base.allowed) return base;
@@ -227,6 +227,26 @@ export class GuardService {
     }
 
     return ALLOWED;
+  }
+
+  /**
+   * Conservative up-front cost of one launch, in lamports.
+   *
+   * This is what the spend limits are evaluated against before an adapter has
+   * planned anything, and — just as importantly — what a reservation writes
+   * into its `preparing` row. A reservation that recorded nothing would be
+   * counted as free by `spentLamportsSince` for as long as adapter preparation
+   * takes, and two concurrent launches could each clear the hourly or daily
+   * SOL cap on the strength of the other's spend being invisible. The row is
+   * reconciled to the planned and then the actual cost as they become known.
+   *
+   * The 6,000,000 lamport allowance above the developer buy covers mint rent,
+   * the associated token account, and priority fees. It is deliberately on the
+   * high side: over-reserving delays a launch, under-reserving overspends.
+   */
+  estimatedLaunchCostLamports(): number {
+    const config = this.settings.get();
+    return solToLamports(config.execution.devBuySol) + 6_000_000;
   }
 
   /**

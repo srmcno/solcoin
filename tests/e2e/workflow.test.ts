@@ -640,3 +640,105 @@ describe('a candidate is never left unreachable', () => {
     expect(statusOf('cpt_setup_fail')).toBe('approved');
   });
 });
+
+describe('the simulated world survives a provider refresh', () => {
+  /**
+   * Credentials, RPC endpoints and market providers are rebuilt whenever
+   * settings change. The simulation adapter used to be rebuilt with them, and
+   * it holds the only copy of every simulated token's drawn fate and of the
+   * simulated fee vaults — so a routine settings save silently emptied the
+   * simulated world. The tokens stayed in the database and on every dashboard,
+   * apparently alive and permanently flat, while the monitor skipped them
+   * because their mints were unknown.
+   */
+  it('keeps a launched token knowable after providers are rebuilt', async () => {
+    const at = container.clock.now();
+    container.db.$raw
+      .prepare(
+        `INSERT INTO concepts (id, name, symbol, description, status, metadata_uri, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run('cpt_refresh', 'Refresh Test', 'RFSH', 'a candidate used in a refresh test', 'approved', 'https://example.invalid/m.json', at, at);
+    container.settings.update({ limits: { maxLaunchesPerHour: 20, maxLaunchesPerDay: 20 } }, { type: 'system' });
+
+    const outcome = await container.launchApproved('cpt_refresh', { actorId: 'tester' });
+    expect(outcome.status).toBe('confirmed');
+    const mint = outcome.mintAddress as string;
+
+    const readMarket = (): { exists: boolean } | undefined =>
+      (container.adapters.get('simulation') as unknown as { getSimulatedMarket?: (m: string) => { exists: boolean } })
+        .getSimulatedMarket?.(mint);
+
+    expect(readMarket()?.exists).toBe(true);
+
+    await container.refreshProviders();
+
+    // The token is still in the database, so it must still be knowable to the
+    // adapter that monitors it. Anything else is a token nothing observes.
+    expect(readMarket()?.exists).toBe(true);
+  });
+});
+
+describe('an edited candidate does not launch with contradicting metadata', () => {
+  /**
+   * `metadata_uri` points at a document carrying the name, symbol and
+   * description as they were when the artwork was produced. An edit changed
+   * only the database row, so the launch would put the edited name on chain
+   * beside a URI serving the old one — the dashboard showing one name and
+   * every wallet another.
+   *
+   * With no metadata storage provider reachable in this environment, the
+   * honest outcome is the URI being detached and the operator told why, rather
+   * than a candidate silently kept launchable with a document that lies about
+   * it.
+   */
+  it('never leaves a stale metadata document attached after an edit', async () => {
+    const at = container.clock.now();
+    container.db.$raw
+      .prepare(
+        `INSERT INTO concepts (id, name, symbol, description, status, metadata_uri, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run('cpt_edit', 'Original Name', 'ORIG', 'the description as first generated', 'awaiting_approval', 'https://example.invalid/original.json', at, at);
+
+    const result = await container.editCandidate(
+      'cpt_edit',
+      { name: 'Edited Name', symbol: 'EDIT', description: 'a description edited by an operator' },
+      { id: 'tester', label: 'Tester' },
+    );
+    expect(result.ok).toBe(true);
+
+    const row = container.db.$raw.prepare('SELECT name, symbol, metadata_uri FROM concepts WHERE id = ?').get('cpt_edit') as {
+      name: string;
+      symbol: string;
+      metadata_uri: string | null;
+    };
+    expect(row.name).toBe('Edited Name');
+    expect(row.symbol).toBe('EDIT');
+
+    // Either re-published to match, or detached with the reason stated. Never
+    // the original document beside a different name.
+    expect(row.metadata_uri).not.toBe('https://example.invalid/original.json');
+    if (row.metadata_uri === null) {
+      expect(result.reason).toMatch(/artwork|metadata/i);
+    }
+  });
+
+  it('leaves the metadata alone when an edit changes nothing', async () => {
+    const at = container.clock.now();
+    container.db.$raw
+      .prepare(
+        `INSERT INTO concepts (id, name, symbol, description, status, metadata_uri, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run('cpt_noop', 'Same Name', 'SAME', 'a description that will not change', 'awaiting_approval', 'https://example.invalid/same.json', at, at);
+
+    const result = await container.editCandidate('cpt_noop', { name: 'Same Name' }, { id: 'tester' });
+    expect(result.ok).toBe(true);
+
+    const row = container.db.$raw.prepare('SELECT metadata_uri FROM concepts WHERE id = ?').get('cpt_noop') as {
+      metadata_uri: string | null;
+    };
+    expect(row.metadata_uri).toBe('https://example.invalid/same.json');
+  });
+});

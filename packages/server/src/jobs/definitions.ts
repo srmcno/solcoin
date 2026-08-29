@@ -206,8 +206,19 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
 
         if (unresolved.length === 0) return { itemsProcessed: restored, result: { restored } };
 
+        // Every chain lookup below runs against whichever network the platform
+        // is connected to now. A launch on a different network cannot be
+        // resolved with it: a mainnet mint is absent from devnet, so asking
+        // devnet about it would return "expired" for a token that exists and
+        // is earning. Those rows wait for the network they belong to.
+        const currentNetwork = container.settings.get().execution.network;
+        let otherNetwork = 0;
         let resolved = 0;
         for (const row of unresolved) {
+          if (String(row.network) !== currentNetwork) {
+            otherNetwork++;
+            continue;
+          }
           const ageMs = container.clock.now() - Number(row.created_at ?? 0);
           // Give an in-flight launch a couple of minutes before intervening.
           if (ageMs < 2 * TIME.minute) continue;
@@ -250,9 +261,18 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
                 );
               });
           }
+          // A failed outcome releases the concept behind it; `resolveUnconfirmed`
+          // owns that, because a concept stranded in `launching` is a
+          // consequence of the launch lifecycle, not of this job's schedule.
           if (outcome !== 'pending') resolved++;
         }
-        return { itemsProcessed: resolved + restored, result: { resolved, restored } };
+        if (otherNetwork > 0) {
+          log.info(
+            { otherNetwork, currentNetwork },
+            'unresolved launches on another network are waiting for that network to be selected again',
+          );
+        }
+        return { itemsProcessed: resolved + restored, result: { resolved, restored, otherNetwork } };
       },
     },
 
@@ -263,10 +283,13 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
       hasSideEffects: false,
       timeoutSeconds: 240,
       run: async ({ progress }) => {
-        const due = container.monitoring.dueForPoll(60);
+        // Only tokens on the network whose providers are loaded. A token
+        // launched on another network is not stale data to be refreshed with
+        // whatever this network's providers happen to say about the mint.
+        const network = container.settings.get().execution.network;
+        const due = container.monitoring.dueForPoll(60, network);
         if (due.length === 0) return { itemsProcessed: 0 };
 
-        const network = container.settings.get().execution.network;
         if (network === 'simulation') {
           // Simulated tokens have no market data provider; their state comes
           // from the simulation adapter's own outcome model.

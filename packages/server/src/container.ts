@@ -378,6 +378,53 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     }
   }
 
+  /**
+   * Put the simulated world back the way the database says it is.
+   *
+   * Simulated tokens and fee vaults live only in the adapter's memory, so
+   * after a restart the adapter knows nothing while the database still holds
+   * every token it launched. This walks that gap: each simulated token is
+   * rebuilt from its mint (the destiny is a pure function of it) and its
+   * recorded creation time, and each creator's lifetime swept total is read
+   * back from the fee ledger so the vaults do not refill with fees the
+   * platform already collected.
+   *
+   * Cheap and idempotent — nothing already known is overwritten — so running
+   * it on every refresh costs one indexed read and keeps a long-lived process
+   * consistent with the database if rows arrive by another route.
+   */
+  function rehydrateSimulation(adapter: SimulationLaunchAdapter): void {
+    try {
+      const tokens = db.$raw
+        .prepare(
+          `SELECT mint, created_on_chain_at, created_at FROM tokens
+            WHERE network = 'simulation' ORDER BY created_at DESC LIMIT 2000`,
+        )
+        .all() as Array<{ mint: string; created_on_chain_at: number | null; created_at: number }>;
+      for (const token of tokens) {
+        adapter.ensureToken(token.mint, Number(token.created_on_chain_at ?? token.created_at));
+      }
+
+      const swept = db.$raw
+        .prepare(
+          `SELECT wallet_address AS creator, COALESCE(SUM(lamports), 0) AS total
+             FROM creator_fee_events
+            WHERE kind = 'collection' AND source = 'simulation' AND wallet_address IS NOT NULL
+            GROUP BY wallet_address`,
+        )
+        .all() as Array<{ creator: string; total: number }>;
+      for (const row of swept) adapter.restoreClaimed(row.creator, Number(row.total));
+
+      if (tokens.length > 0 || swept.length > 0) {
+        log.info({ tokens: tokens.length, creators: swept.length }, 'simulated state rehydrated from the database');
+      }
+    } catch (e) {
+      // Never fatal: an empty simulated world is recoverable, a server that
+      // will not boot is not.
+      log.warn({ err: safeErrorText(e, 200) }, 'could not rehydrate the simulated world');
+    }
+  }
+
   async function refreshProviders(): Promise<void> {
     const config = settings.get();
     const network = config.execution.network;
@@ -386,8 +433,22 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     state.rpc = await buildRpc(network, getCredential);
 
     // --- Launch adapters -----------------------------------------------------
+    /*
+     * The simulation adapter survives a refresh; everything else is rebuilt.
+     *
+     * It holds the only copy of each simulated token's drawn fate and of the
+     * simulated fee vaults, and it depends on nothing that a refresh changes —
+     * no RPC, no credentials, no network. Replacing it on every credential or
+     * settings change (which is what used to happen) silently emptied the
+     * simulated world: previously launched tokens became unknown mints, the
+     * monitor skipped them, and their vaults reset to nothing.
+     */
+    const existingSimulation = state.adapters.get('simulation');
+    const simulation =
+      existingSimulation instanceof SimulationLaunchAdapter ? existingSimulation : new SimulationLaunchAdapter({ now });
     state.adapters.clear();
-    state.adapters.set('simulation', new SimulationLaunchAdapter({ now }));
+    state.adapters.set('simulation', simulation);
+    rehydrateSimulation(simulation);
     if (state.rpc && network !== 'simulation') {
       try {
         state.adapters.set(
@@ -635,6 +696,34 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
         .prepare('UPDATE concepts SET name = ?, symbol = ?, description = ?, updated_at = ? WHERE id = ?')
         .run(name, symbol, description, now(), conceptId);
 
+      /*
+       * The metadata document has to follow the edit.
+       *
+       * `metadata_uri` points at a JSON document that carries the name, symbol
+       * and description as they were when the artwork was produced. The launch
+       * puts the edited name on chain and that URI beside it, so leaving the
+       * document stale ships a token whose own metadata contradicts it — the
+       * dashboard would show one name and every wallet another.
+       *
+       * If re-publishing fails, the URI is detached rather than left wrong.
+       * That takes the candidate out of the launch queue (which requires a
+       * metadata URI) until artwork is produced again, which is the honest
+       * outcome: a candidate that cannot currently be launched correctly.
+       */
+      let warning: string | undefined;
+      const textChanged =
+        name !== String(concept.name) ||
+        symbol !== String(concept.symbol) ||
+        description !== String(concept.description ?? '');
+      if (textChanged && concept.metadata_uri) {
+        const republished = await artwork.republishMetadata(conceptId, { name, symbol, description });
+        if (!republished.ok) {
+          concepts.clearMetadata(conceptId);
+          warning = `${republished.reason} The candidate cannot be launched until its artwork and metadata are produced again.`;
+          log.warn({ conceptId, reason: republished.reason }, 'could not re-publish metadata after an edit');
+        }
+      }
+
       audit.record({
         actorType: 'user',
         actorId: actor.id ?? null,
@@ -642,11 +731,11 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
         action: 'concept.edited',
         targetType: 'concept',
         targetId: conceptId,
-        parameters: { name, symbol },
+        parameters: { name, symbol, metadataRepublished: textChanged && Boolean(concept.metadata_uri) && !warning },
         ipAddress: actor.ipAddress ?? null,
       });
 
-      return { ok: true };
+      return warning ? { ok: true, reason: warning } : { ok: true };
     },
 
     async feeCollectionPreview(creator) {

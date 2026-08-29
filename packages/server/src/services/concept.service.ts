@@ -456,6 +456,18 @@ export class ConceptService {
       );
   }
 
+  /**
+   * Detach a concept's metadata document.
+   *
+   * Used when an edit has made the stored document wrong and re-publishing it
+   * failed. The launch queue selects on `metadata_uri IS NOT NULL`, so this
+   * takes the candidate out of the autonomous path rather than letting it
+   * launch carrying metadata that contradicts its own name.
+   */
+  clearMetadata(id: string): void {
+    this.db.$raw.prepare('UPDATE concepts SET metadata_uri = NULL, updated_at = ? WHERE id = ?').run(this.now(), id);
+  }
+
   /** Expire stale candidates so the approval queue never shows dead opportunities. */
   expireStale(): number {
     return this.db.$raw

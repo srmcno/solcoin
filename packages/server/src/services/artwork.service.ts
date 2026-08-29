@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRng, hashSeed } from '@solcoin/shared';
 import { AppError, safeErrorText } from '../core/errors.js';
@@ -118,6 +118,57 @@ export class ArtworkService {
       quality,
       costUsd,
     };
+  }
+
+  /**
+   * Re-publish a concept's metadata document after its text was edited.
+   *
+   * The metadata URI is what the token actually carries on chain, and it
+   * points at a document holding the name, symbol and description as they were
+   * when the artwork was produced. An operator edit changed only the database
+   * row, so the launch would put the edited name on chain while every wallet
+   * and explorer read the old one from the URI — a token whose own metadata
+   * contradicts it.
+   *
+   * The image is reused byte-for-byte from disk: the edit changed the text,
+   * not the artwork, and re-generating would burn image credits and could trip
+   * the duplicate-artwork check against the concept's own previous image.
+   */
+  async republishMetadata(
+    conceptId: string,
+    input: { name: string; symbol: string; description: string },
+  ): Promise<{ ok: true; metadataUri: string } | { ok: false; reason: string }> {
+    const row = this.db.$raw.prepare('SELECT image_path FROM concepts WHERE id = ?').get(conceptId) as
+      | { image_path: string | null }
+      | undefined;
+    const imagePath = row?.image_path ?? null;
+    if (!imagePath || !existsSync(imagePath)) {
+      return { ok: false, reason: 'The original artwork file is no longer available, so its metadata cannot be re-published.' };
+    }
+
+    let image: Buffer;
+    try {
+      image = readFileSync(imagePath);
+    } catch (e) {
+      return { ok: false, reason: `The original artwork could not be read: ${safeErrorText(e, 120)}` };
+    }
+
+    const mimeType = imagePath.endsWith('.svg') ? 'image/svg+xml' : imagePath.endsWith('.png') ? 'image/png' : 'application/octet-stream';
+
+    try {
+      const uploaded = await this.storage.upload({
+        image,
+        imageMimeType: mimeType,
+        name: input.name,
+        symbol: input.symbol,
+        description: input.description,
+      });
+      this.concepts.setArtwork(conceptId, { metadataUri: uploaded.metadataUri, imageUri: uploaded.imageUri });
+      this.log.info({ conceptId, provider: uploaded.provider }, 're-published metadata after an edit');
+      return { ok: true, metadataUri: uploaded.metadataUri };
+    } catch (e) {
+      return { ok: false, reason: `The metadata storage provider rejected the upload: ${safeErrorText(e, 160)}` };
+    }
   }
 
   private async renderImage(

@@ -86,17 +86,31 @@ export class MonitoringService {
       );
   }
 
-  /** Tokens whose next poll is due, ordered so the hottest are served first. */
-  dueForPoll(limit = 60): Array<{ mint: string; tier: MonitorTier; lifecycle: TokenLifecycle; network: string }> {
+  /**
+   * Tokens whose next poll is due, ordered so the hottest are served first.
+   *
+   * Scoped to one network. The caller polls with providers bound to whichever
+   * network the platform is on now, and those providers cannot answer for a
+   * token on another one: a devnet mint is unknown to a mainnet aggregator,
+   * and — worse in the other direction — the simulation branch would hand a
+   * real mainnet token a synthetic market. Either way the token's record would
+   * be overwritten with numbers that are not about it.
+   */
+  dueForPoll(limit = 60, network?: string): Array<{ mint: string; tier: MonitorTier; lifecycle: TokenLifecycle; network: string }> {
     const rows = this.db.$raw
       .prepare(
         `SELECT mint, monitor_tier, lifecycle, network FROM tokens
-          WHERE (next_poll_at IS NULL OR next_poll_at <= ?)
+          WHERE (next_poll_at IS NULL OR next_poll_at <= ?) AND (? IS NULL OR network = ?)
           ORDER BY CASE monitor_tier WHEN 'hot' THEN 0 WHEN 'warm' THEN 1 WHEN 'cool' THEN 2 ELSE 3 END,
                    next_poll_at ASC
           LIMIT ?`,
       )
-      .all(this.now(), limit) as Array<{ mint: string; monitor_tier: string; lifecycle: string; network: string }>;
+      .all(this.now(), network ?? null, network ?? null, limit) as Array<{
+      mint: string;
+      monitor_tier: string;
+      lifecycle: string;
+      network: string;
+    }>;
     return rows.map((r) => ({
       mint: r.mint,
       tier: r.monitor_tier as MonitorTier,
