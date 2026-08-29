@@ -170,6 +170,17 @@ export class NotificationService {
 
     const timestamp = this.now();
 
+    /*
+     * The channel lookup happens before the dedupe check, not after.
+     *
+     * It is the only `await` on this path, and with it in the middle two
+     * notifications sharing a dedupe key could both find no duplicate and both
+     * insert — which is precisely what the dedupe window exists to prevent.
+     * Reading the channels first leaves the check and the insert with nothing
+     * between them.
+     */
+    const channels = await this.enabledChannels();
+
     if (input.dedupeKey && config.dedupeWindowMinutes > 0) {
       const windowStart = timestamp - config.dedupeWindowMinutes * TIME.minute;
       const duplicate = this.db.$raw
@@ -185,8 +196,6 @@ export class NotificationService {
         };
       }
     }
-
-    const channels = await this.enabledChannels();
     const id = newId('ntf', timestamp);
     const data = { ...(input.data ?? {}), ...(input.link ? { link: input.link } : {}) };
 
