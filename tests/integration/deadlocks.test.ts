@@ -186,14 +186,20 @@ describe('outgoing transactions left pending', () => {
    */
   const HOUR = 3_600_000;
 
-  function seedPending(id: string, purpose: string, signature: string | null, ageMs: number): void {
+  function seedPending(
+    id: string,
+    purpose: string,
+    signature: string | null,
+    ageMs: number,
+    network = 'simulation',
+  ): void {
     harness.db.$raw
       .prepare(
         `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports, fee_lamports,
                                           counterparty, status, signature, occurred_at, created_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
-      .run(id, 'Wallet1111', 'devnet', 'out', purpose, 100_000, 5_000, 'Dest1111', 'pending', signature, harness.clock.now() - ageMs, harness.clock.now() - ageMs);
+      .run(id, 'Wallet1111', network, 'out', purpose, 100_000, 5_000, 'Dest1111', 'pending', signature, harness.clock.now() - ageMs, harness.clock.now() - ageMs);
   }
 
   function statusOf(id: string): { status: string; fee_lamports: number } {
@@ -242,8 +248,21 @@ describe('outgoing transactions left pending', () => {
   it('does not touch a transaction that is merely recent', async () => {
     seedPending('wtx_recent', 'fee_claim', null, 60_000);
     const result = await walletService().reconcilePending();
-    expect(result).toEqual({ confirmed: 0, failed: 0, voided: 0, unknown: 0 });
+    expect(result).toMatchObject({ confirmed: 0, failed: 0, voided: 0, unknown: 0, otherNetwork: 0 });
     expect(statusOf('wtx_recent').status).toBe('pending');
+  });
+
+  it('leaves a row recorded on another network alone, and says so', async () => {
+    // The RPC is bound to whichever network is configured now. Asking it about
+    // a signature from a different chain returns nothing, which would read as
+    // "unknown" and leave the row stuck forever — blocking identical transfers
+    // and stranding fee claims until an operator happened to switch back.
+    seedPending('wtx_other', 'manual_transfer', 'Sig-elsewhere', 2 * HOUR, 'devnet');
+    const result = await walletService().reconcilePending();
+
+    expect(result.otherNetwork).toBe(1);
+    expect(result.unknown).toBe(0);
+    expect(statusOf('wtx_other').status).toBe('pending');
   });
 
   it('resolves a signed transaction against the chain', async () => {

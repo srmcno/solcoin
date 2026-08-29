@@ -331,3 +331,93 @@ describe('a claim that was broadcast but not confirmed', () => {
     expect(row.signature).toBeNull();
   });
 });
+
+describe('concurrent fee claims', () => {
+  const withSigner = async <T>(fn: (kp: Keypair) => Promise<T>): Promise<T> =>
+    fn(Keypair.fromSeed(new Uint8Array(32).fill(17)));
+
+  beforeEach(() => {
+    harness.settings.update({ autonomy: { fee_collection: 'approve' } }, { type: 'system' });
+    (adapter as unknown as { vaults: Map<string, { curve: number; amm: number }> }).vaults.set(CREATOR, {
+      curve: solToLamports(0.5),
+      amm: 0,
+    });
+  });
+
+  it('lets only one claim per creator run at a time', async () => {
+    // A manual collection racing the scheduled collector. Both would otherwise
+    // reserve and broadcast, and the second would pay a signature fee to sweep
+    // a vault the first is already emptying.
+    const slow = {
+      ...adapter,
+      prepareFeeClaim: adapter.prepareFeeClaim.bind(adapter),
+      getAccruedFees: adapter.getAccruedFees.bind(adapter),
+      executeFeeClaim: async (plan: { claimableLamports: number }) => {
+        await new Promise((r) => setTimeout(r, 30));
+        return {
+          signature: `Sig-${Math.random().toString(36).slice(2, 10)}`,
+          slot: 0,
+          claimedLamports: plan.claimableLamports,
+          networkFeeLamports: 5_000,
+          simulated: true,
+        };
+      },
+    };
+
+    const results = await Promise.all([
+      service.collect(slow as never, CREATOR, withSigner, { actorType: 'user' }),
+      service.collect(slow as never, CREATOR, withSigner, { actorType: 'job' }),
+    ]);
+
+    expect(results.filter((r) => r.collected)).toHaveLength(1);
+    const refused = results.find((r) => !r.collected);
+    expect(refused?.reason).toMatch(/already in progress/i);
+  });
+});
+
+describe('a fee claim recovered by reconciliation', () => {
+  it('reaches the revenue ledger rather than vanishing', () => {
+    const before = harness.db.$raw.prepare('SELECT COUNT(*) AS n FROM creator_fee_events').get() as { n: number };
+
+    // The claim landed, but only reconciliation found out. Confirming the
+    // spend says the transaction happened; it says nothing about where the
+    // money went. The last accrual snapshot is the evidence for how much.
+    harness.db.$raw
+      .prepare(
+        `INSERT INTO creator_fee_events (id, token_mint, kind, vault, wallet_address, lamports, claimable_lamports,
+                                         source, observed_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run('fee_snap', null, 'accrual_snapshot', 'both', CREATOR, 0, solToLamports(0.4), 'simulation', harness.clock.now(), harness.clock.now());
+
+    const recorded = service.finaliseRecoveredClaim({
+      reservationId: 'wtx_rec',
+      signature: 'Sig-recovered',
+      creator: CREATOR,
+    });
+    expect(recorded).toBe(true);
+
+    const after = harness.db.$raw.prepare('SELECT COUNT(*) AS n FROM creator_fee_events').get() as { n: number };
+    expect(after.n).toBeGreaterThan(before.n + 1);
+
+    const event = harness.db.$raw
+      .prepare(`SELECT source, kind, lamports FROM creator_fee_events WHERE transaction_signature = 'Sig-recovered'`)
+      .get() as { source: string; kind: string; lamports: number };
+    expect(event.kind).toBe('collection');
+    // Labelled so nothing downstream mistakes a derived figure for a measured one.
+    expect(event.source).toBe('recovered');
+    // And it carries the amount, not a zero that would leave the revenue lost
+    // just as surely as recording nothing at all.
+    expect(event.lamports).toBe(solToLamports(0.4));
+  });
+
+  it('is idempotent, so a repeated reconciliation cannot double-count revenue', () => {
+    service.finaliseRecoveredClaim({ reservationId: 'wtx_r1', signature: 'Sig-once', creator: CREATOR });
+    expect(service.finaliseRecoveredClaim({ reservationId: 'wtx_r1', signature: 'Sig-once', creator: CREATOR })).toBe(false);
+
+    const count = harness.db.$raw
+      .prepare(`SELECT COUNT(*) AS n FROM creator_fee_events WHERE transaction_signature = 'Sig-once'`)
+      .get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+});

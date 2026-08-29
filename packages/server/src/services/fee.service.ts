@@ -329,31 +329,54 @@ export class FeeService {
       includeAmm: plan.includesAmm,
     });
     const reservationId = newId('wtx', this.now());
-    const reservation = this.guard.reserveSpend({ operation: 'fee_collection', lamports: estimatedFeeLamports }, () => {
-      this.db.$raw
-        .prepare(
-          `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports, fee_lamports,
-                                            counterparty, status, occurred_at, created_at)
-           VALUES (?,?,?,?,?,0,?,?,?,?,?)`,
-        )
-        .run(
-          reservationId,
-          creator,
-          this.settings.get().execution.network,
-          'out',
-          'fee_claim',
-          estimatedFeeLamports,
-          creator,
-          'pending',
-          this.now(),
-          this.now(),
-        );
-    });
+    const network = this.settings.get().execution.network;
+    const reservation = this.guard.reserveSpend(
+      { operation: 'fee_collection', lamports: estimatedFeeLamports },
+      () => {
+        this.db.$raw
+          .prepare(
+            `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports, fee_lamports,
+                                              counterparty, status, occurred_at, created_at)
+             VALUES (?,?,?,?,?,0,?,?,?,?,?)`,
+          )
+          .run(
+            reservationId,
+            creator,
+            network,
+            'out',
+            'fee_claim',
+            estimatedFeeLamports,
+            creator,
+            'pending',
+            this.now(),
+            this.now(),
+          );
+      },
+      {
+        /*
+         * One claim per creator per network at a time.
+         *
+         * A manual collection racing the scheduled collector would otherwise
+         * both reserve and both broadcast, and the second would pay a
+         * signature fee to sweep a vault the first is already emptying. There
+         * is no uniqueness constraint that would catch it, so the check has to
+         * happen inside the reservation transaction.
+         */
+        alreadyClaimed: () =>
+          this.db.$raw
+            .prepare(
+              `SELECT 1 FROM wallet_transactions
+                WHERE purpose = 'fee_claim' AND status = 'pending' AND wallet_address = ? AND network = ?
+                LIMIT 1`,
+            )
+            .get(creator, network) !== undefined,
+      },
+    );
     if (reservation.outcome !== 'reserved') {
       const reason =
         reservation.outcome === 'denied'
           ? (reservation.decision.reason ?? 'Spending limits do not permit a fee claim right now.')
-          : 'Another fee claim is already in progress.';
+          : 'A fee claim for this creator is already in progress on this network.';
       return { collected: false, lamports: 0, reason };
     }
 
@@ -488,6 +511,83 @@ export class FeeService {
         update.run(share, row.creator_fees_accrued_lamports, this.now(), row.mint);
       }
     })();
+  }
+
+  /**
+   * Finish a fee claim that only reconciliation could confirm.
+   *
+   * Marking the spend reservation confirmed says the transaction landed. It
+   * does not say where the money went: the success path also writes a
+   * `creator_fee_events` collection and attributes the proceeds back to the
+   * tokens that earned them. Without that the SOL sits in the wallet with no
+   * provenance, the next accrual snapshot reads the emptied vault as a zero
+   * delta rather than a collection, and the revenue is missing permanently
+   * from the fee totals, the accounting and the per-token attribution — on a
+   * platform whose whole purpose is measuring that number.
+   *
+   * The amount is *derived*, not measured: the balance delta that gives the
+   * exact figure was only observable at claim time, and by now it is gone. The
+   * last accrual snapshot before the claim is the best evidence available, and
+   * the event is recorded with `source = 'recovered'` so nothing downstream
+   * mistakes it for a measurement.
+   */
+  finaliseRecoveredClaim(input: { reservationId: string; signature: string; creator: string }): boolean {
+    const existing = this.db.$raw
+      .prepare('SELECT 1 FROM creator_fee_events WHERE transaction_signature = ? LIMIT 1')
+      .get(input.signature);
+    if (existing) return false;
+
+    const snapshot = this.latestSnapshot(input.creator);
+    const lamports = snapshot?.totalClaimableLamports ?? 0;
+    if (lamports <= 0) {
+      this.log.warn(
+        { creator: input.creator, signature: input.signature },
+        'a recovered fee claim has no accrual snapshot to size it; recording it at zero so the signature is not lost',
+      );
+    }
+
+    this.db.$raw
+      .prepare(
+        `INSERT INTO creator_fee_events
+           (id, token_mint, kind, vault, wallet_address, lamports, claimable_lamports, usd_value, sol_price_usd,
+            transaction_signature, network_fee_lamports, source, observed_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(transaction_signature, vault) DO NOTHING`,
+      )
+      .run(
+        newId('fee', this.now()),
+        null,
+        'collection',
+        'both',
+        input.creator,
+        lamports,
+        0,
+        null,
+        null,
+        input.signature,
+        0,
+        'recovered',
+        this.now(),
+        this.now(),
+      );
+
+    this.attributeCollection(input.creator, lamports);
+
+    this.audit.record({
+      actorType: 'job',
+      action: AUDIT_ACTIONS.feeCollected,
+      targetType: 'wallet',
+      targetId: input.creator,
+      transactionSignature: input.signature,
+      reason: 'recovered by reconciliation after an unconfirmed claim',
+      parameters: { lamports, derivedFromSnapshot: true },
+    });
+
+    this.log.warn(
+      { creator: input.creator, signature: input.signature, sol: lamportsToSol(lamports) },
+      'recorded a fee claim recovered by reconciliation; the amount is derived from the last accrual snapshot',
+    );
+    return true;
   }
 
   latestSnapshot(creator: string): { totalClaimableLamports: number; observedAt: number } | null {

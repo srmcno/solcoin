@@ -57,6 +57,14 @@ export interface SchedulerOptions {
   instanceId?: string;
 }
 
+/**
+ * How often an abandoned run's lease is renewed while it is still running.
+ *
+ * Short enough that a lease is never briefly expired between renewals, and the
+ * renewal writes twice this far ahead so a missed tick does not open a window.
+ */
+const LEASE_RENEWAL_MS = 15_000;
+
 export class JobScheduler {
   private readonly log = componentLogger('scheduler');
   private readonly jobs = new Map<string, JobDefinition>();
@@ -265,16 +273,31 @@ export class JobScheduler {
       if (settled) {
         release();
       } else {
-        // Timed out with the work still running. Holding the lease until it
-        // stops is the whole point: a second copy started now would be doing
-        // the same side effects alongside the first.
+        /*
+         * Timed out with the work still running.
+         *
+         * Keeping this instance's slot occupied is not enough: `locked_until`
+         * was set to the deadline that has just passed, and a second scheduler
+         * process does not share this one's in-memory map. It would read an
+         * expired lease and start the same side-effecting job alongside the
+         * abandoned one. The lease has to keep being renewed in the database
+         * for as long as the work might still be running.
+         */
         this.log.warn(
           { job: job.name, timeoutMs },
-          'job exceeded its timeout and did not stop; holding its lease until the abandoned run settles',
+          'job exceeded its timeout and did not stop; holding and renewing its lease until the abandoned run settles',
         );
+        const renew = setInterval(() => {
+          this.options.db.$raw
+            .prepare('UPDATE job_state SET locked_until = ?, updated_at = ? WHERE job_name = ? AND lock_token = ?')
+            .run(this.now() + LEASE_RENEWAL_MS * 2, this.now(), job.name, lockToken);
+        }, LEASE_RENEWAL_MS);
+        renew.unref?.();
+
         void work
           .catch(() => undefined)
           .finally(() => {
+            clearInterval(renew);
             this.log.warn({ job: job.name }, 'an abandoned job run finally settled; releasing its lease');
             release();
           });

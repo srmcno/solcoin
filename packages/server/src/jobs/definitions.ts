@@ -399,6 +399,12 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
         // The job is named for this and did not do it: a transaction left
         // `pending` by a process that died was never touched again.
         const pending = await container.wallet.reconcilePending();
+        // Confirming the spend is only half of a recovered fee claim; the
+        // revenue it brought in still has to reach the fee ledger.
+        let recovered = 0;
+        for (const claim of pending.recoveredClaims) {
+          if (container.fees.finaliseRecoveredClaim(claim)) recovered++;
+        }
         const settings = container.settings.get();
 
         if (settings.wallet.autoSweepEnabled && settings.autonomy.wallet_transfer === 'auto') {
@@ -417,7 +423,7 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
 
         return {
           itemsProcessed: 1 + pending.confirmed + pending.failed + pending.voided,
-          result: { operating: balances.operating, treasury: balances.treasury, pending },
+          result: { operating: balances.operating, treasury: balances.treasury, pending, recoveredClaims: recovered },
         };
       },
     },

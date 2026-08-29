@@ -84,13 +84,21 @@ class TokenBucket {
       this.tokens = Math.min(this.capacity, this.tokens + elapsed * this.refillPerMs);
       this.lastRefill = now;
     }
-    if (this.tokens >= 1) {
-      this.tokens -= 1;
-      return 0;
-    }
     const deficit = 1 - this.tokens;
-    this.tokens = 0;
-    return Math.ceil(deficit / this.refillPerMs);
+
+    /*
+     * The debit happens either way, and the balance is allowed to go negative.
+     *
+     * Returning a delay without taking the token leaves it there for whoever
+     * asks next: the waiting caller sleeps, a second caller arrives, the bucket
+     * refills the one token the first was waiting for, and both run at once.
+     * Sustained traffic then settles at roughly twice the configured rate once
+     * the burst is spent — against APIs whose rate limits are the reason this
+     * class exists. Carrying the debt makes each subsequent caller compute a
+     * longer wait, which is what serialises them.
+     */
+    this.tokens -= 1;
+    return deficit <= 0 ? 0 : Math.ceil(deficit / this.refillPerMs);
   }
 }
 

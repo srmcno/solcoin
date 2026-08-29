@@ -133,19 +133,55 @@ export class WalletService {
     failed: number;
     voided: number;
     unknown: number;
+    /** Pending on a network this process is not currently connected to. */
+    otherNetwork: number;
+    /**
+     * Fee claims found to have landed. Confirming the spend is only half of it
+     * — the revenue they brought in still has to reach the fee ledger, which
+     * is not this service's to write.
+     */
+    recoveredClaims: Array<{ reservationId: string; signature: string; creator: string }>;
   }> {
     const cutoff = this.now() - (options.olderThanMs ?? 10 * 60_000);
     const rows = this.db.$raw
       .prepare(
-        `SELECT id, signature, purpose FROM wallet_transactions
+        `SELECT id, signature, purpose, network, wallet_address FROM wallet_transactions
           WHERE direction = 'out' AND status = 'pending' AND occurred_at < ?
           ORDER BY occurred_at ASC LIMIT 100`,
       )
-      .all(cutoff) as Array<{ id: string; signature: string | null; purpose: string }>;
+      .all(cutoff) as Array<{
+      id: string;
+      signature: string | null;
+      purpose: string;
+      network: string;
+      wallet_address: string;
+    }>;
 
-    const result = { confirmed: 0, failed: 0, voided: 0, unknown: 0 };
+    /*
+     * The RPC client is bound to whichever network is configured now, and a
+     * pending row remembers the network it was sent to. Asking mainnet about a
+     * devnet signature returns nothing, which reads as "outcome unknown" and
+     * would leave the row pending forever — blocking identical transfers and
+     * stranding fee claims until an operator happened to switch back.
+     *
+     * Rows from another network are counted separately and reported, so the
+     * state is visible rather than silently stuck.
+     */
+    const network = this.settings.get().execution.network;
+    const result = {
+      confirmed: 0,
+      failed: 0,
+      voided: 0,
+      unknown: 0,
+      otherNetwork: 0,
+      recoveredClaims: [] as Array<{ reservationId: string; signature: string; creator: string }>,
+    };
 
     for (const row of rows) {
+      if (row.network !== network) {
+        result.otherNetwork++;
+        continue;
+      }
       if (!row.signature) {
         if (row.purpose === 'fee_claim') {
           this.db.$raw
@@ -181,6 +217,13 @@ export class WalletService {
       } else {
         this.db.$raw.prepare(`UPDATE wallet_transactions SET status = 'confirmed' WHERE id = ?`).run(row.id);
         result.confirmed++;
+        if (row.purpose === 'fee_claim') {
+          result.recoveredClaims.push({
+            reservationId: row.id,
+            signature: row.signature,
+            creator: row.wallet_address,
+          });
+        }
       }
     }
 
@@ -188,6 +231,12 @@ export class WalletService {
       this.log.warn(
         { unknown: result.unknown },
         'outgoing transactions whose outcome cannot be determined; they are left pending rather than guessed at',
+      );
+    }
+    if (result.otherNetwork > 0) {
+      this.log.warn(
+        { otherNetwork: result.otherNetwork, network },
+        'pending transactions recorded on another network; switch back to resolve them, they cannot be looked up from here',
       );
     }
     return result;

@@ -170,11 +170,29 @@ export class AuthService {
     });
 
     if (!valid) {
-      const failed = Number(row.failed_login_count ?? 0) + 1;
-      const lock = failed >= MAX_FAILED_LOGINS ? this.now() + LOCKOUT_MS : null;
-      this.db.$raw
-        .prepare('UPDATE users SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?')
-        .run(failed, lock, this.now(), row.id);
+      /*
+       * The count is incremented by the database, not by this process.
+       *
+       * `row` was read before the password check, and that check is
+       * deliberately slow. Several wrong guesses verifying concurrently would
+       * all read the same count and all write the same incremented value, so a
+       * batch of parallel attempts spread across addresses consumed one
+       * attempt between them — which is exactly the case the per-account
+       * lockout exists for, the per-IP limiter having already been evaded.
+       */
+      const updated = this.db.$raw
+        .prepare(
+          `UPDATE users
+              SET failed_login_count = failed_login_count + 1,
+                  locked_until = CASE WHEN failed_login_count + 1 >= ? THEN ? ELSE locked_until END,
+                  updated_at = ?
+            WHERE id = ?
+        RETURNING failed_login_count`,
+        )
+        .get(MAX_FAILED_LOGINS, this.now() + LOCKOUT_MS, this.now(), row.id) as
+        | { failed_login_count: number }
+        | undefined;
+      const failed = Number(updated?.failed_login_count ?? 0);
       this.audit.record({
         actorType: 'user',
         actorId: String(row.id),
