@@ -612,10 +612,13 @@ function toTokenMarketData(
   const numSells = day?.numSells;
 
   const graduatedAtMs = parseIsoMs(asString(raw['graduatedAt']));
-  const graduatedPool = asString(raw['graduatedPool']) ?? undefined;
+  // Address-shaped fields are shape-checked, not sanitised: they key market
+  // records and become explorer links, so a value that is not a base58 pubkey
+  // is not an address and is dropped rather than cleaned into a lookalike.
+  const graduatedPool = asAddress(raw['graduatedPool']) ?? undefined;
   const launchpad = asString(raw['launchpad']) ?? undefined;
   const firstPool = isRecord(raw['firstPool']) ? raw['firstPool'] : null;
-  const firstPoolAddress = firstPool ? (asString(firstPool['id']) ?? undefined) : undefined;
+  const firstPoolAddress = firstPool ? (asAddress(firstPool['id']) ?? undefined) : undefined;
   const firstPoolCreatedAtMs = firstPool ? parseIsoMs(asString(firstPool['createdAt'])) : null;
 
   const extras: JupiterTokenExtras = {
@@ -623,9 +626,9 @@ function toTokenMarketData(
     ...optional('organicScoreLabel', readOrganicLabel(raw['organicScoreLabel'])),
     ...optional('isVerified', asBoolean(raw['isVerified'])),
     ...optional('launchpad', launchpad ? sanitiseExternalText(launchpad, 64) : undefined),
-    ...optional('dev', asString(raw['dev'])),
+    ...optional('dev', asAddress(raw['dev'])),
     ...optional('decimals', finiteNumber(raw['decimals'])),
-    ...optional('tokenProgram', asString(raw['tokenProgram'])),
+    ...optional('tokenProgram', asAddress(raw['tokenProgram'])),
     ...optional('circSupply', finiteNumber(raw['circSupply'])),
     ...optional('totalSupply', finiteNumber(raw['totalSupply'])),
     ...optional('fdvUsd', finiteNumber(raw['fdv'])),
@@ -779,6 +782,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * A base58 Solana pubkey, or null. Applied to every address-shaped field so a
+ * malformed value is rejected outright rather than sanitised into a
+ * plausible-looking address that would silently mislead downstream lookups.
+ */
+function asAddress(value: unknown): string | null {
+  const s = asString(value);
+  return s !== null && MINT_RE.test(s) ? s : null;
 }
 
 function asBoolean(value: unknown): boolean | undefined {

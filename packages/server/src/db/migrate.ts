@@ -32,19 +32,18 @@ export function runMigrations(db: Db): void {
   migrate(db, { migrationsFolder: migrationsFolder() });
 }
 
-async function main(): Promise<void> {
+/**
+ * Standalone migration runner, invoked by `src/cli/migrate.ts`.
+ *
+ * Deliberately NOT guarded by an `import.meta.url === process.argv[1]` check:
+ * the server is bundled into a single file, so that comparison is true for
+ * every module in the bundle and would fire this CLI on every boot.
+ */
+export function migrateCli(): void {
   const env = loadEnv();
   const db = openDatabase({ path: env.DATABASE_PATH });
   runMigrations(db);
   // eslint-disable-next-line no-console
   console.log(`Migrations applied to ${env.DATABASE_PATH}`);
   closeDatabase(db);
-}
-
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((e) => {
-    // eslint-disable-next-line no-console
-    console.error(e);
-    process.exit(1);
-  });
 }

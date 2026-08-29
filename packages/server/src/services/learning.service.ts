@@ -6,15 +6,17 @@ import {
   auc,
   betaPosterior,
   brierScore,
-  calibrationBins,
   clamp,
   encodeFeatures,
   lamportsToSol,
   logLoss,
   mean,
+  median,
   neutralFeatures,
   predictProbability,
+  quantile,
   shrinkPrediction,
+  topShare,
   updateLinearModel,
   updateLogNormalModel,
   wilsonInterval,
@@ -86,6 +88,21 @@ const HOLDOUT_FRACTION = 0.25;
 /** A validation set smaller than this cannot distinguish an improvement from luck. */
 const MIN_HOLDOUT_SAMPLES = 6;
 
+/**
+ * Below this, a distribution summary (median, percentiles, tail share) is
+ * describing a handful of points rather than a shape, and is flagged unreliable.
+ */
+const MIN_DISTRIBUTION_SAMPLES = 10;
+
+/**
+ * The two limits that apply to every number this service produces, stated once
+ * and attached to each report rather than left for the reader to remember.
+ */
+const SELECTION_BIAS_CAVEAT =
+  'Selection bias: only concepts the quality gate approved were ever launched, so every figure here describes approved launches, not concepts in general. Nothing here says how the rejected ones would have done.';
+const CAUSATION_CAVEAT =
+  'Association, not causation: learned weights and driver attributions describe what co-moves with success in observational data the platform itself selected on. A feature can look predictive because it helped decide what to launch, not because it causes buyers to arrive.';
+
 /** Design-vector width for the current encoder; stored models must match it. */
 const ENCODED_FEATURE_WIDTH = encodeFeatures(neutralFeatures()).values.length;
 
@@ -94,20 +111,35 @@ const ENCODED_FEATURE_WIDTH = encodeFeatures(neutralFeatures()).values.length;
 // ---------------------------------------------------------------------------
 
 export interface HeadMetrics {
-  /** Labelled samples for this head. */
+  /** Labelled samples for this head. Every figure below is conditional on it. */
   n: number;
-  logLoss: number;
-  brier: number;
-  /** 0.5 when one class is absent — AUC is undefined without both. */
-  auc: number;
-  meanPredicted: number;
-  observedRate: number;
+  /** Positive labels among those samples. A rate without this is not a rate. */
+  positives: number;
+  /**
+   * Metrics are null, never zero, when there is nothing to measure: a log loss
+   * of 0 reads as "perfect", which is the opposite of what an empty head means.
+   */
+  logLoss: number | null;
+  brier: number | null;
+  /** Null unless both classes are present — AUC is undefined otherwise. */
+  auc: number | null;
+  meanPredicted: number | null;
+  observedRate: number | null;
+  /** False below MIN_VERDICT_SAMPLES: the numbers are printable, not evidence. */
+  reliable: boolean;
 }
 
 export interface BundleMetrics {
+  /** Held-out launches contributing at least one label. */
   samples: number;
-  /** Mean log loss across heads that had labels; the activation criterion. */
-  meanLogLoss: number;
+  /** Labelled (head, launch) pairs behind `meanLogLoss`. */
+  labelledPairs: number;
+  /**
+   * Log loss pooled over every labelled pair — sample-weighted, not a flat mean
+   * across heads, so a head with six labels cannot outvote one with sixty in the
+   * activation decision. Null when nothing was labelled.
+   */
+  meanLogLoss: number | null;
   byHead: Record<PredictionHead, HeadMetrics>;
 }
 
@@ -127,14 +159,28 @@ export type CalibrationVerdict =
   | 'underconfident'
   | 'insufficient data';
 
+export interface CalibrationBin {
+  binLower: number;
+  binUpper: number;
+  /** Launches in this bin. Bins are frequently thin; read them with this. */
+  n: number;
+  /** Mean predicted probability inside the bin; null when the bin is empty. */
+  predicted: number | null;
+  /** Realised frequency inside the bin; null when the bin is empty. */
+  observed: number | null;
+  /** 95% Wilson bounds on `observed`, so a three-launch bin is visibly thin. */
+  observedLower: number | null;
+  observedUpper: number | null;
+}
+
 export interface HeadCalibration extends HeadMetrics {
   head: PredictionHead;
-  /** Wilson interval on the realised frequency, at 95%. */
-  observedLower: number;
-  observedUpper: number;
+  /** Wilson interval on the realised frequency, at 95%. Null with no labels. */
+  observedLower: number | null;
+  observedUpper: number | null;
   verdict: CalibrationVerdict;
   explanation: string;
-  bins: Array<{ binLower: number; binUpper: number; n: number; predicted: number; observed: number }>;
+  bins: CalibrationBin[];
 }
 
 export interface CalibrationReport {
@@ -145,6 +191,8 @@ export interface CalibrationReport {
   n: number;
   heads: HeadCalibration[];
   note: string;
+  /** Limits that apply to every number in this report. */
+  caveats: string[];
 }
 
 export interface PredictionError {
@@ -167,6 +215,12 @@ export interface PredictionError {
   creatorFeesErrorSol: number | null;
   expectedVolume24hSol: number;
   actualVolume24hSol: number | null;
+  /**
+   * Peak holder count observed *inside the outcome window*, not the token's
+   * all-time peak: quoting a later peak beside a label measured at the horizon
+   * produces a sentence that contradicts its own label. Null when no holder
+   * count was ever recorded in that window.
+   */
   peakHolders: number | null;
   explanation: string;
 }
@@ -181,6 +235,8 @@ export interface ObservedRate {
   /** Labels actually observed, whether or not they were enough to be used. */
   observedN: number;
   successes: number;
+  /** Prior pseudo-count the observed rate is shrunk toward. Zero for a prior. */
+  priorPseudoCount: number;
   sufficient: boolean;
   source: 'observed' | 'prior';
 }
@@ -190,10 +246,12 @@ export interface ObservedBaseRates {
   ten_holders: ObservedRate;
   hundred_holders: ObservedRate;
   graduation: ObservedRate;
-  /** Labelled launches available. Zero when none of the heads reached threshold. */
+  /** Labelled launches available — the pool the per-head counts are drawn from. */
   n: number;
+  /** True once at least one head has enough labels to replace its prior. */
   sufficient: boolean;
   reason: string;
+  caveats: string[];
 }
 
 export interface WeightShift {
@@ -206,6 +264,35 @@ export interface WeightShift {
   after: number;
   delta: number;
   reading: string;
+}
+
+/** A long-tailed quantity described by its shape, not by its mean alone. */
+export interface SkewedSummary {
+  n: number;
+  /** Reported for reconciliation only; on this distribution it is not typical. */
+  mean: number;
+  median: number;
+  p10: number;
+  p90: number;
+  max: number;
+  /** Share of the total contributed by the top decile. Usually most of it. */
+  topDecileShare: number;
+  /** False below MIN_DISTRIBUTION_SAMPLES — the shape is not yet estimated. */
+  reliable: boolean;
+}
+
+export interface RevenueAccuracy {
+  /** Launches with a measured creator-fee figure. */
+  n: number;
+  /** Realised creator fees per launch. Null when nothing has been measured. */
+  actualFeesSol: SkewedSummary | null;
+  /** What the model expected for those same launches. */
+  predictedFeesSol: SkewedSummary | null;
+  /** Median of (actual − expected): the typical miss, robust to the one winner. */
+  medianErrorSol: number | null;
+  medianAbsoluteErrorSol: number | null;
+  reliable: boolean;
+  note: string;
 }
 
 export interface LearningSummary {
@@ -222,7 +309,11 @@ export interface LearningSummary {
   };
   calibration: Array<{ head: PredictionHead; n: number; verdict: CalibrationVerdict; explanation: string }>;
   baseRates: ObservedBaseRates;
+  /** Revenue is long-tailed; this reports its shape, never a bare average. */
+  revenue: RevenueAccuracy;
   movedWeights: WeightShift[];
+  /** Limits that apply to every number above. */
+  caveats: string[];
   /** How much of this to believe, stated plainly. */
   trust: string;
 }
@@ -282,6 +373,24 @@ interface LaunchRow {
   token_updated_at: number;
   /** Lifetime observation count; zero means this token was never polled. */
   obs_total: number;
+  /**
+   * Observations that actually carried a holder count, from either source. A
+   * poll that returned no holder field is not a poll that saw zero holders.
+   */
+  holder_obs_total: number;
+  /** Observations that actually carried a 24h volume figure. */
+  volume_obs_total: number;
+}
+
+/** Aggregates over the observation series inside one outcome window. */
+interface WindowStats {
+  n: number;
+  holder_obs: number;
+  volume_obs: number;
+  peak_holders: number | null;
+  peak_volume: number | null;
+  peak_tx: number | null;
+  peak_buys: number | null;
 }
 
 export class LearningService {
@@ -334,7 +443,11 @@ export class LearningService {
                 t.creator_fees_collected_lamports AS creator_fees_collected_lamports,
                 t.last_fee_check_at  AS last_fee_check_at,
                 t.updated_at         AS token_updated_at,
-                (SELECT COUNT(*) FROM market_observations mo WHERE mo.token_mint = t.mint) AS obs_total
+                (SELECT COUNT(*) FROM market_observations mo WHERE mo.token_mint = t.mint) AS obs_total,
+                (SELECT COUNT(mo2.holders) FROM market_observations mo2 WHERE mo2.token_mint = t.mint)
+                  + (SELECT COUNT(*) FROM holder_snapshots hs WHERE hs.token_mint = t.mint) AS holder_obs_total,
+                (SELECT COUNT(mo3.volume_24h_sol) FROM market_observations mo3 WHERE mo3.token_mint = t.mint)
+                  AS volume_obs_total
            FROM launches l
            JOIN tokens t ON t.launch_id = l.id
           WHERE l.status = 'confirmed'
@@ -354,11 +467,21 @@ export class LearningService {
     // Peak holders and trading evidence inside the outcome window.
     const windowStats = this.db.$raw.prepare(
       `SELECT COUNT(*)                          AS n,
+              COUNT(holders)                    AS holder_obs,
+              COUNT(volume_24h_sol)             AS volume_obs,
               MAX(holders)                      AS peak_holders,
               MAX(COALESCE(volume_24h_sol, 0))  AS peak_volume,
               MAX(COALESCE(tx_count_24h, 0))    AS peak_tx,
               MAX(COALESCE(buys_24h, 0))        AS peak_buys
          FROM market_observations
+        WHERE token_mint = ? AND observed_at >= ? AND observed_at <= ?`,
+    );
+
+    // Holder counts also arrive through holder_snapshots, which is the richer
+    // source; ignoring it would leave labels NULL that are in fact measured.
+    const holderWindowStats = this.db.$raw.prepare(
+      `SELECT COUNT(holder_count) AS n, MAX(holder_count) AS peak
+         FROM holder_snapshots
         WHERE token_mint = ? AND observed_at >= ? AND observed_at <= ?`,
     );
 
@@ -387,8 +510,9 @@ export class LearningService {
           continue;
         }
 
-        const stats = windowStats.get(row.mint, confirmedAt, windowEnd) as
-          | { n: number; peak_holders: number | null; peak_volume: number | null; peak_tx: number | null; peak_buys: number | null }
+        const stats = windowStats.get(row.mint, confirmedAt, windowEnd) as WindowStats | undefined;
+        const holderStats = holderWindowStats.get(row.mint, confirmedAt, windowEnd) as
+          | { n: number; peak: number | null }
           | undefined;
         // Volume is a 24h rolling figure, so the volume label is always measured
         // over the first day regardless of the label horizon. That keeps the
@@ -396,13 +520,21 @@ export class LearningService {
         const volumeWindowEnd = Math.min(confirmedAt + 24 * TIME.hour, windowEnd);
         const volumeStats =
           volumeWindowEnd > confirmedAt
-            ? (windowStats.get(row.mint, confirmedAt, volumeWindowEnd) as
-                | { n: number; peak_volume: number | null }
-                | undefined)
+            ? (windowStats.get(row.mint, confirmedAt, volumeWindowEnd) as WindowStats | undefined)
             : undefined;
 
         const observedInWindow = asNumber(stats?.n);
-        const peakHoldersInWindow = observedInWindow > 0 ? asNumber(stats?.peak_holders) : null;
+        // The holder label rests on COUNT(holders), never COUNT(*): a poll that
+        // returned no holder field must not be recorded as a sighting of zero.
+        const marketHolderObs = asNumber(stats?.holder_obs);
+        const snapHolderObs = asNumber(holderStats?.n);
+        const peakHoldersInWindow =
+          marketHolderObs + snapHolderObs > 0
+            ? Math.max(
+                marketHolderObs > 0 ? asNumber(stats?.peak_holders) : 0,
+                snapHolderObs > 0 ? asNumber(holderStats?.peak) : 0,
+              )
+            : null;
         const tradedInWindow =
           observedInWindow > 0 &&
           (asNumber(stats?.peak_volume) > 0 || asNumber(stats?.peak_tx) > 0 || asNumber(stats?.peak_buys) > 0);
@@ -432,14 +564,18 @@ export class LearningService {
           graduatedAt !== null && graduatedAt <= windowEnd ? 1 : obsTotal > 0 || firstTradeAt !== null ? 0 : null;
 
         // Holder peaks come from the observation series inside the window. When
-        // the series is empty we can still label honestly in two cases, both of
-        // which rely on peak_holders being monotone non-decreasing over time:
-        // a current peak of zero means the peak was zero then too, and a token
-        // untouched since before the window boundary carries its window value.
+        // nothing in the window carried a holder count, the label falls back to
+        // the token's running peak only if a holder count was ever recorded at
+        // all (holder_obs_total > 0) and peak_holders is therefore a measurement.
+        // Two cases are then honest, both resting on peak_holders being monotone
+        // non-decreasing: a current peak of zero means the peak was zero then
+        // too, and a token untouched since the window closed carries its window
+        // value. Anything else stays NULL.
+        const holderObsTotal = asNumber(row.holder_obs_total);
         const holderPeak =
           peakHoldersInWindow !== null
             ? peakHoldersInWindow
-            : obsTotal === 0
+            : holderObsTotal === 0
               ? null
               : peakHoldersNow === 0 || tokenUpdatedAt <= windowEnd
                 ? peakHoldersNow
@@ -447,17 +583,22 @@ export class LearningService {
         const yTenHolders: Label = holderPeak === null ? null : holderPeak >= 10 ? 1 : 0;
         const yHundredHolders: Label = holderPeak === null ? null : holderPeak >= 100 ? 1 : 0;
 
-        const observedVolume = asNumber(volumeStats?.n) > 0 ? asNumber(volumeStats?.peak_volume) : null;
+        const observedVolume = asNumber(volumeStats?.volume_obs) > 0 ? asNumber(volumeStats?.peak_volume) : null;
+        const volumeObsTotal = asNumber(row.volume_obs_total);
         // A token whose all-time peak 24h volume is zero had zero volume in the
-        // first day too; that is a measurement, not a guess. Otherwise unknown.
-        const actualVolume24hSol =
-          observedVolume !== null
-            ? observedVolume
-            : obsTotal === 0 && firstTradeAt === null
-              ? null
-              : asNumber(row.peak_volume_24h_sol) === 0 || tokenUpdatedAt <= windowEnd
-                ? asNumber(row.peak_volume_24h_sol)
-                : null;
+        // first day too; that is a measurement, not a guess. But a token whose
+        // volume field was never populated at all has no measurement to fall
+        // back on, and stays NULL rather than becoming a silent zero.
+        let actualVolume24hSol: number | null;
+        if (observedVolume !== null) {
+          actualVolume24hSol = observedVolume;
+        } else if (volumeObsTotal === 0) {
+          actualVolume24hSol = null;
+        } else if (asNumber(row.peak_volume_24h_sol) === 0 || tokenUpdatedAt <= windowEnd) {
+          actualVolume24hSol = asNumber(row.peak_volume_24h_sol);
+        } else {
+          actualVolume24hSol = null;
+        }
 
         // Fees are cumulative and monotone, so this is the amount earned to date
         // rather than strictly as of the horizon. Running the recorder close to
@@ -562,7 +703,7 @@ export class LearningService {
     const candidate = this.applyUpdates(bundle, trainSplit, `${bundle.version}+candidate`);
     const metricsAfter = scoreBundle(candidate, holdout);
 
-    if (metricsBefore.samples === 0 || metricsAfter.samples === 0) {
+    if (metricsBefore.meanLogLoss === null || metricsAfter.meanLogLoss === null) {
       return {
         trained: false,
         version: bundle.version,
@@ -574,15 +715,24 @@ export class LearningService {
       };
     }
 
+    const lossBefore = metricsBefore.meanLogLoss;
+    const lossAfter = metricsAfter.meanLogLoss;
     // Tolerance covers float noise only. Anything that genuinely raises log loss
     // is rejected: a miscalibrated model is worse than a stale one because it
     // still speaks with the same confidence, and downstream gates act on it.
-    const improved = metricsAfter.meanLogLoss <= metricsBefore.meanLogLoss + 1e-6;
+    const improved = lossAfter <= lossBefore + 1e-6;
     const totalTrained = bundle.trainedOn + samples.length;
     const version = `v2-trained-${totalTrained}`;
+    // The comparison is made on whatever holdout exists, which early on is a
+    // handful of launches. Say so in the reason rather than letting "improved"
+    // stand as if it were established.
+    const powerNote =
+      holdout.length < MIN_VERDICT_SAMPLES
+        ? `; a ${holdout.length}-launch holdout cannot separate a real improvement from luck, so this decision is provisional`
+        : '';
 
     if (!improved) {
-      const delta = metricsAfter.meanLogLoss - metricsBefore.meanLogLoss;
+      const delta = lossAfter - lossBefore;
       // The rejected candidate is still persisted (inactive) so the decision is
       // auditable, and the outcomes stay unapplied so a later, larger batch can
       // try again with the same evidence.
@@ -590,7 +740,7 @@ export class LearningService {
         { ...candidate, version, createdAt: this.now(), trainedOn: totalTrained },
         {
           activate: false,
-          notes: `Rejected: held-out log loss rose from ${metricsBefore.meanLogLoss.toFixed(4)} to ${metricsAfter.meanLogLoss.toFixed(4)}.`,
+          notes: `Rejected: held-out log loss rose from ${lossBefore.toFixed(4)} to ${lossAfter.toFixed(4)} on ${holdout.length} launches (${metricsAfter.labelledPairs} labelled head-launch pairs).`,
           metrics: { before: metricsBefore, after: metricsAfter, holdout: holdout.length },
         },
       );
@@ -601,7 +751,7 @@ export class LearningService {
         metricsBefore,
         metricsAfter,
         activated: false,
-        reason: `update rejected: held-out log loss worsened by ${delta.toFixed(4)} (${metricsBefore.meanLogLoss.toFixed(4)} → ${metricsAfter.meanLogLoss.toFixed(4)}) on ${holdout.length} launches`,
+        reason: `update rejected: held-out log loss worsened by ${delta.toFixed(4)} (${lossBefore.toFixed(4)} → ${lossAfter.toFixed(4)}) on ${holdout.length} launches${powerNote}`,
       };
     }
 
@@ -622,7 +772,7 @@ export class LearningService {
 
     this.predictions.saveBundle(shipped, {
       activate: true,
-      notes: `Trained on ${samples.length} outcomes (${trainSplit.length} fit / ${holdout.length} validated). Held-out log loss ${metricsBefore.meanLogLoss.toFixed(4)} → ${metricsAfter.meanLogLoss.toFixed(4)}. Shipped weights are refit over all ${samples.length} samples.`,
+      notes: `Trained on ${samples.length} outcomes (${trainSplit.length} fit / ${holdout.length} validated). Held-out log loss ${lossBefore.toFixed(4)} → ${lossAfter.toFixed(4)}. Shipped weights are refit over all ${samples.length} samples.`,
       metrics: { before: metricsBefore, after: metricsAfter, holdout: holdout.length, shippedOn: samples.length },
     });
 
@@ -631,10 +781,10 @@ export class LearningService {
     this.events.emit('model.retrained', {
       version,
       trainedOn: totalTrained,
-      logLoss: metricsAfter.meanLogLoss,
+      logLoss: lossAfter,
     });
     this.log.info(
-      { version, samples: samples.length, before: metricsBefore.meanLogLoss, after: metricsAfter.meanLogLoss },
+      { version, samples: samples.length, before: lossBefore, after: lossAfter },
       'activated a retrained model bundle',
     );
 
@@ -645,7 +795,7 @@ export class LearningService {
       metricsBefore,
       metricsAfter,
       activated: true,
-      reason: `held-out log loss improved from ${metricsBefore.meanLogLoss.toFixed(4)} to ${metricsAfter.meanLogLoss.toFixed(4)} on ${holdout.length} launches`,
+      reason: `held-out log loss improved from ${lossBefore.toFixed(4)} to ${lossAfter.toFixed(4)} on ${holdout.length} launches${powerNote}`,
     };
   }
 
@@ -671,43 +821,43 @@ export class LearningService {
       const pairs = samples
         .filter((s) => s.labels[head] !== null)
         .map((s) => ({ p: s.predicted[head], y: s.labels[head] as 0 | 1 }));
-      const n = pairs.length;
-      const successes = pairs.reduce((acc, d) => acc + d.y, 0);
-      const meanPredicted = n > 0 ? mean(pairs.map((d) => d.p)) : 0;
-      const interval = wilsonInterval(successes, n);
+      const metrics = headMetrics(pairs);
+      const n = metrics.n;
+      const successes = metrics.positives;
+      const meanPredicted = metrics.meanPredicted;
+      const interval = n > 0 ? wilsonInterval(successes, n) : null;
 
       let verdict: CalibrationVerdict = 'insufficient data';
-      let explanation = `Only ${n} labelled launch${n === 1 ? '' : 'es'} for this outcome. At least ${MIN_VERDICT_SAMPLES} are needed before the difference between forecast and reality means anything.`;
+      let explanation =
+        n === 0
+          ? `No launch has a measured ${HEAD_LABELS[head]} outcome yet, so this head has not been scored at all. Its metrics are reported as null rather than as zero.`
+          : `Only ${n} labelled launch${n === 1 ? '' : 'es'} (${successes} positive) for this outcome. At least ${MIN_VERDICT_SAMPLES} are needed before the gap between forecast and reality means anything, so the figures alongside are descriptive, not evidence.`;
 
-      if (n >= MIN_VERDICT_SAMPLES) {
+      if (interval !== null && meanPredicted !== null && n >= MIN_VERDICT_SAMPLES) {
         const observedPct = (interval.point * 100).toFixed(1);
         const predictedPct = (meanPredicted * 100).toFixed(1);
         const rangePct = `${(interval.lower * 100).toFixed(1)}–${(interval.upper * 100).toFixed(1)}%`;
+        const base = `over ${n} launches, ${successes} of which came good`;
         if (meanPredicted > interval.upper) {
           verdict = 'overconfident';
-          explanation = `The model averaged ${predictedPct}% but only ${observedPct}% happened (95% interval ${rangePct} over ${n} launches). It is promising more than the market delivers.`;
+          explanation = `The model averaged ${predictedPct}% but only ${observedPct}% happened (95% interval ${rangePct} ${base}). It is promising more than the market delivers.`;
         } else if (meanPredicted < interval.lower) {
           verdict = 'underconfident';
-          explanation = `The model averaged ${predictedPct}% and ${observedPct}% happened (95% interval ${rangePct} over ${n} launches). It is talking these launches down.`;
+          explanation = `The model averaged ${predictedPct}% and ${observedPct}% happened (95% interval ${rangePct} ${base}). It is talking these launches down.`;
         } else {
           verdict = 'well calibrated';
-          explanation = `The model averaged ${predictedPct}% and ${observedPct}% happened, inside the 95% interval ${rangePct} over ${n} launches.`;
+          explanation = `The model averaged ${predictedPct}% and ${observedPct}% happened, inside the 95% interval ${rangePct} ${base}.`;
         }
       }
 
       heads.push({
+        ...metrics,
         head,
-        n,
-        logLoss: logLoss(pairs),
-        brier: brierScore(pairs),
-        auc: auc(pairs),
-        meanPredicted,
-        observedRate: interval.point,
-        observedLower: interval.lower,
-        observedUpper: interval.upper,
+        observedLower: interval?.lower ?? null,
+        observedUpper: interval?.upper ?? null,
         verdict,
         explanation,
-        bins: calibrationBins(pairs, 10),
+        bins: calibrationBinsWithBounds(pairs, 10),
       });
     }
 
@@ -720,6 +870,12 @@ export class LearningService {
         samples.length === 0
           ? 'No launch has both a stored prediction and a measured outcome yet, so there is nothing to calibrate against.'
           : 'Each launch contributes once, at its longest elapsed horizon. Probabilities are the ones published at decision time, not re-scored with the current model.',
+      caveats: [
+        `A verdict needs ${MIN_VERDICT_SAMPLES} labelled launches; heads below that are returned as "insufficient data" rather than scored, and their metrics carry reliable: false.`,
+        'Calibration bins are thin by construction — each carries its own n and a 95% Wilson interval, and an empty bin reports null, not zero.',
+        SELECTION_BIAS_CAVEAT,
+        CAUSATION_CAVEAT,
+      ],
     };
   }
 
@@ -739,18 +895,54 @@ export class LearningService {
     if (samples.length === 0) return [];
 
     const mints = samples.map((s) => s.tokenMint).filter((m): m is string => typeof m === 'string' && m.length > 0);
-    const meta = new Map<string, { name: string; symbol: string; peak_holders: number }>();
+    const meta = new Map<string, { name: string; symbol: string; confirmedAt: number | null }>();
     if (mints.length > 0) {
       const rows = this.db.$raw
         .prepare(
-          `SELECT mint, name, symbol, peak_holders FROM tokens WHERE mint IN (${mints.map(() => '?').join(',')})`,
+          `SELECT t.mint AS mint, t.name AS name, t.symbol AS symbol, l.confirmed_at AS confirmed_at
+             FROM tokens t
+             LEFT JOIN launches l ON l.id = t.launch_id
+            WHERE t.mint IN (${mints.map(() => '?').join(',')})`,
         )
-        .all(...mints) as unknown as Array<{ mint: string; name: string; symbol: string; peak_holders: number }>;
-      for (const r of rows) meta.set(r.mint, { name: r.name, symbol: r.symbol, peak_holders: asNumber(r.peak_holders) });
+        .all(...mints) as unknown as Array<{
+        mint: string;
+        name: string;
+        symbol: string;
+        confirmed_at: number | null;
+      }>;
+      for (const r of rows) {
+        meta.set(r.mint, { name: r.name, symbol: r.symbol, confirmedAt: asNumberOrNull(r.confirmed_at) });
+      }
     }
+
+    // The holder count quoted in an explanation must be the peak *inside the
+    // outcome window*. The token's all-time peak is a different number measured
+    // over a different period, and quoting it beside a label measured at the
+    // horizon produces sentences that contradict their own label.
+    const marketPeak = this.db.$raw.prepare(
+      `SELECT COUNT(holders) AS n, MAX(holders) AS peak
+         FROM market_observations
+        WHERE token_mint = ? AND observed_at >= ? AND observed_at <= ?`,
+    );
+    const snapshotPeak = this.db.$raw.prepare(
+      `SELECT COUNT(holder_count) AS n, MAX(holder_count) AS peak
+         FROM holder_snapshots
+        WHERE token_mint = ? AND observed_at >= ? AND observed_at <= ?`,
+    );
+    const peakHoldersInWindow = (mint: string | null, confirmedAt: number | null, horizonHours: number): number | null => {
+      if (mint === null || confirmedAt === null) return null;
+      const end = confirmedAt + horizonHours * TIME.hour;
+      const a = marketPeak.get(mint, confirmedAt, end) as { n: number; peak: number | null } | undefined;
+      const b = snapshotPeak.get(mint, confirmedAt, end) as { n: number; peak: number | null } | undefined;
+      const counted = asNumber(a?.n) + asNumber(b?.n);
+      // No holder count was ever recorded in the window: unknown, not zero.
+      if (counted === 0) return null;
+      return Math.max(asNumber(a?.n) > 0 ? asNumber(a?.peak) : 0, asNumber(b?.n) > 0 ? asNumber(b?.peak) : 0);
+    };
 
     return samples.map((s) => {
       const info = s.tokenMint ? meta.get(s.tokenMint) : undefined;
+      const peakHolders = peakHoldersInWindow(s.tokenMint, info?.confirmedAt ?? null, s.horizonHours);
       const signedError = {} as Record<PredictionHead, number | null>;
       for (const head of PREDICTION_HEADS) {
         const y = s.labels[head];
@@ -774,8 +966,8 @@ export class LearningService {
         creatorFeesErrorSol: s.creatorFeesSol === null ? null : s.creatorFeesSol - s.expectedCreatorFeesSol,
         expectedVolume24hSol: s.expectedVolume24hSol,
         actualVolume24hSol: s.volume24hSol,
-        peakHolders: info?.peak_holders ?? null,
-        explanation: explainOutcome(s, info?.peak_holders ?? null),
+        peakHolders,
+        explanation: explainOutcome(s, peakHolders),
       };
     });
   }
@@ -818,10 +1010,13 @@ export class LearningService {
           n: 0,
           observedN,
           successes,
+          priorPseudoCount: 0,
           sufficient: false,
           source: 'prior',
         };
       }
+      // Shrunk toward the domain prior with a pseudo-count of 20, so a run of
+      // four lucky launches cannot drag graduation from 1.2% to 100%.
       const posterior = betaPosterior(successes, observedN, prior * priorStrength, (1 - prior) * priorStrength);
       return {
         rate: posterior.mean,
@@ -830,6 +1025,7 @@ export class LearningService {
         n: observedN,
         observedN,
         successes,
+        priorPseudoCount: priorStrength,
         sufficient: true,
         source: 'observed',
       };
@@ -846,11 +1042,12 @@ export class LearningService {
       ten_holders,
       hundred_holders,
       graduation,
-      n: sufficient ? samples.length : 0,
+      n: samples.length,
       sufficient,
       reason: sufficient
-        ? `Measured over ${samples.length} launches with realised outcomes.`
-        : `Only ${samples.length} launch${samples.length === 1 ? '' : 'es'} have measured outcomes; ${MIN_BASE_RATE_SAMPLES} are required per outcome before an observed rate replaces the prior. The values returned are the encoded priors.`,
+        ? `Measured over ${samples.length} launches with realised outcomes; each head reports its own n and successes, and rates are shrunk toward the domain prior with a pseudo-count of ${priorStrength}.`
+        : `Only ${samples.length} launch${samples.length === 1 ? '' : 'es'} have measured outcomes; ${MIN_BASE_RATE_SAMPLES} labels are required per outcome before an observed rate replaces the prior. Every rate returned here is the encoded prior, carrying n = 0 — it is an assumption, not a measurement.`,
+      caveats: [SELECTION_BIAS_CAVEAT],
     };
   }
 
@@ -862,6 +1059,7 @@ export class LearningService {
   async summary(): Promise<LearningSummary> {
     const bundle = this.predictions.getBundle();
     const [calibration, baseRates] = await Promise.all([this.evaluate(), this.observedBaseRates()]);
+    const samples = this.loadSamples({ unappliedOnly: false, bundle });
 
     const counts = this.db.$raw
       .prepare(
@@ -899,7 +1097,14 @@ export class LearningService {
         explanation: h.explanation,
       })),
       baseRates,
+      revenue: revenueAccuracy(samples),
       movedWeights: movedWeights(bundle, 8),
+      caveats: [
+        `Sample sizes: ${total} outcome rows across ${asNumber(counts?.launches)} launches, of which ${applied} have been folded into the model. Every rate above carries its own n; anything under ${MIN_VERDICT_SAMPLES} labels is reported as insufficient rather than scored.`,
+        SELECTION_BIAS_CAVEAT,
+        CAUSATION_CAVEAT,
+        'Creator fees and volume are long-tailed: the mean is dominated by whichever launch happened to work, so the median, the p10–p90 range and the top-decile share are the figures to read.',
+      ],
       trust: trustStatement(bundle, calibration, baseRates),
     };
   }
@@ -945,7 +1150,11 @@ export class LearningService {
                    JOIN predictions p ON p.id = po.prediction_id
                   WHERE ${clauses.join(' AND ')}
                   ORDER BY p.created_at ${options.newestFirst ? 'DESC' : 'ASC'}
-                  ${options.limit ? `LIMIT ${Math.floor(options.limit)}` : ''}`;
+                  ${
+                    options.limit !== undefined && Number.isFinite(options.limit) && options.limit > 0
+                      ? `LIMIT ${Math.floor(options.limit)}`
+                      : ''
+                  }`;
 
     const rows = this.db.$raw.prepare(sql).all(...params) as unknown as Array<Record<string, unknown>>;
     const at = this.now();
@@ -1082,8 +1291,9 @@ export class LearningService {
  */
 function scoreBundle(bundle: SuccessModelBundle, samples: LabelledSample[]): BundleMetrics {
   const byHead = {} as Record<PredictionHead, HeadMetrics>;
-  const headLosses: number[] = [];
-  let scored = 0;
+  const contributing = new Set<string>();
+  let pooledLoss = 0;
+  let labelledPairs = 0;
 
   for (const head of PREDICTION_HEADS) {
     const pairs: Array<{ p: number; y: 0 | 1 }> = [];
@@ -1092,24 +1302,135 @@ function scoreBundle(bundle: SuccessModelBundle, samples: LabelledSample[]): Bun
       if (y === null) continue;
       const raw = predictProbability(bundle.classification[head], s.x);
       pairs.push({ p: shrinkPrediction(raw, bundle.trainedOn, bundle.baseRates[head]), y });
+      contributing.add(s.predictionId);
     }
-    const n = pairs.length;
-    const loss = logLoss(pairs);
-    byHead[head] = {
-      n,
-      logLoss: loss,
-      brier: brierScore(pairs),
-      auc: auc(pairs),
-      meanPredicted: n > 0 ? mean(pairs.map((d) => d.p)) : 0,
-      observedRate: n > 0 ? mean(pairs.map((d) => d.y)) : 0,
-    };
-    if (n > 0) {
-      headLosses.push(loss);
-      scored = Math.max(scored, n);
+    const metrics = headMetrics(pairs);
+    byHead[head] = metrics;
+    if (metrics.logLoss !== null) {
+      // Pooled by label count rather than averaged across heads: a head with six
+      // labels must not carry the same weight in the activation decision as one
+      // with sixty, and the head sets differ in size by an order of magnitude.
+      pooledLoss += metrics.logLoss * metrics.n;
+      labelledPairs += metrics.n;
     }
   }
 
-  return { samples: scored, meanLogLoss: headLosses.length > 0 ? mean(headLosses) : 0, byHead };
+  return {
+    samples: contributing.size,
+    labelledPairs,
+    meanLogLoss: labelledPairs > 0 ? pooledLoss / labelledPairs : null,
+    byHead,
+  };
+}
+
+/**
+ * Metrics for one head, with absence represented as absence.
+ *
+ * Zero is a legitimate value for log loss, Brier and an observed rate, so an
+ * empty head cannot report zero: it reports null, and `reliable` says whether
+ * there are enough labels for the numbers to mean anything at all.
+ */
+function headMetrics(pairs: Array<{ p: number; y: 0 | 1 }>): HeadMetrics {
+  const n = pairs.length;
+  const positives = pairs.reduce((acc, d) => acc + d.y, 0);
+  // AUC needs both classes; with one class it is undefined, and the 0.5 a naive
+  // implementation returns would read as "no discriminating power".
+  const bothClasses = positives > 0 && positives < n;
+  return {
+    n,
+    positives,
+    logLoss: n > 0 ? logLoss(pairs) : null,
+    brier: n > 0 ? brierScore(pairs) : null,
+    auc: bothClasses ? auc(pairs) : null,
+    meanPredicted: n > 0 ? mean(pairs.map((d) => d.p)) : null,
+    observedRate: n > 0 ? positives / n : null,
+    reliable: n >= MIN_VERDICT_SAMPLES,
+  };
+}
+
+/**
+ * Reliability-diagram bins, each with its own sample size and a 95% Wilson
+ * interval on the realised frequency. Bins are thin by construction — ten of
+ * them over a few dozen launches — so a bin without its interval invites the
+ * reader to see miscalibration in three coin flips. Empty bins report null.
+ */
+function calibrationBinsWithBounds(pairs: Array<{ p: number; y: 0 | 1 }>, bins: number): CalibrationBin[] {
+  const out: CalibrationBin[] = [];
+  for (let i = 0; i < bins; i++) {
+    const lo = i / bins;
+    const hi = (i + 1) / bins;
+    const inBin = pairs.filter(({ p }) => (i === bins - 1 ? p >= lo && p <= hi : p >= lo && p < hi));
+    const n = inBin.length;
+    if (n === 0) {
+      out.push({ binLower: lo, binUpper: hi, n: 0, predicted: null, observed: null, observedLower: null, observedUpper: null });
+      continue;
+    }
+    const successes = inBin.reduce((acc, d) => acc + d.y, 0);
+    const interval = wilsonInterval(successes, n);
+    out.push({
+      binLower: lo,
+      binUpper: hi,
+      n,
+      predicted: mean(inBin.map((d) => d.p)),
+      observed: interval.point,
+      observedLower: interval.lower,
+      observedUpper: interval.upper,
+    });
+  }
+  return out;
+}
+
+/**
+ * Describe a long-tailed quantity by its shape.
+ *
+ * Creator fees and volume are the classic case where the mean is a fiction: one
+ * launch in fifty earns more than the other forty-nine combined, so the average
+ * describes no launch that ever happened. The median says what a typical launch
+ * does, the p10–p90 range says how wide the spread is, and the top-decile share
+ * says how much of the whole business rests on the tail.
+ */
+function describeSkewed(values: number[]): SkewedSummary | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    n: values.length,
+    mean: mean(values),
+    median: median(sorted),
+    p10: quantile(sorted, 0.1),
+    p90: quantile(sorted, 0.9),
+    max: sorted[sorted.length - 1] ?? 0,
+    topDecileShare: topShare(values, 0.1),
+    reliable: values.length >= MIN_DISTRIBUTION_SAMPLES,
+  };
+}
+
+/** Realised revenue against forecast revenue, reported as a distribution. */
+function revenueAccuracy(samples: LabelledSample[]): RevenueAccuracy {
+  const measured = samples.filter((s) => s.creatorFeesSol !== null);
+  const n = measured.length;
+  if (n === 0) {
+    return {
+      n: 0,
+      actualFeesSol: null,
+      predictedFeesSol: null,
+      medianErrorSol: null,
+      medianAbsoluteErrorSol: null,
+      reliable: false,
+      note: 'No launch has a measured creator-fee figure yet, so forecast accuracy on revenue is insufficient to report.',
+    };
+  }
+  const errors = measured.map((s) => (s.creatorFeesSol as number) - s.expectedCreatorFeesSol);
+  return {
+    n,
+    actualFeesSol: describeSkewed(measured.map((s) => s.creatorFeesSol as number)),
+    predictedFeesSol: describeSkewed(measured.map((s) => s.expectedCreatorFeesSol)),
+    // Median rather than mean error: a single outlier launch would otherwise set
+    // the headline accuracy figure for every launch.
+    medianErrorSol: median(errors),
+    medianAbsoluteErrorSol: median(errors.map((e) => Math.abs(e))),
+    reliable: n >= MIN_DISTRIBUTION_SAMPLES,
+    note: `Creator fees over ${n} launch${n === 1 ? '' : 'es'} with a measured figure. The distribution is long-tailed — most launches earn nearly nothing and one carries the total — so read the median and the top-decile share; the mean is included only so the figures reconcile.${n < MIN_DISTRIBUTION_SAMPLES ? ` Below ${MIN_DISTRIBUTION_SAMPLES} launches none of this is a stable estimate of the shape.` : ''}`,
+  };
 }
 
 const HEAD_LABELS: Record<PredictionHead, string> = {
@@ -1127,6 +1448,10 @@ const HEAD_LABELS: Record<PredictionHead, string> = {
  * is the platform's headline call, so that head is explained whenever it has a
  * label. The text names the specific features that carried or sank the estimate
  * rather than restating the numbers.
+ *
+ * These are attributions of the *model's* arithmetic, not of the world: a driver
+ * is the term that moved the log-odds, and it is one launch, so the wording
+ * deliberately stops short of saying a feature caused the outcome.
  */
 function explainOutcome(sample: LabelledSample, peakHolders: number | null): string {
   const head: PredictionHead =
@@ -1163,7 +1488,7 @@ function explainOutcome(sample: LabelledSample, peakHolders: number | null): str
   const error = p - y;
 
   if (drivers.length === 0) {
-    return `${opening} — no single feature stood out in this prediction; it sat close to the ${(p * 100).toFixed(0)}% base rate the model starts from.`;
+    return `${opening} — no feature contributions were stored with this prediction, so there is nothing to attribute the call to either way.`;
   }
 
   // A miss in the pessimistic direction: whatever the model weighted against
@@ -1172,9 +1497,9 @@ function explainOutcome(sample: LabelledSample, peakHolders: number | null): str
     const drag = negatives[0];
     const lift = positives[0];
     if (drag) {
-      return `${opening} — the model marked it down mostly for ${humanise(drag.feature)} (${drag.contribution.toFixed(2)} to the log-odds), and that read was wrong here${lift ? `; it under-weighted ${humanise(lift.feature)}, which is what actually carried it` : ''}.`;
+      return `${opening} — the model marked it down mostly for ${humanise(drag.feature)} (${drag.contribution.toFixed(2)} to the log-odds), and that read did not hold here${lift ? `; ${humanise(lift.feature)} was the one thing arguing the other way, and it was weighted too lightly` : ''}.`;
     }
-    return `${opening} — nothing in the feature vector flagged this one; ${lift ? `${humanise(lift.feature)} was its strongest signal and the model still under-weighted it` : 'the model simply started from too low a base rate'}.`;
+    return `${opening} — nothing in the feature vector flagged this one; ${lift ? `${humanise(lift.feature)} was its strongest signal and the model still weighted it too lightly` : 'the model simply started from too low a base rate'}.`;
   }
 
   // A miss in the optimistic direction: the features it leaned on did not pay.
@@ -1182,7 +1507,11 @@ function explainOutcome(sample: LabelledSample, peakHolders: number | null): str
     const lift = positives[0];
     const second = positives[1];
     if (lift) {
-      return `${opening} — the estimate rested on ${humanise(lift.feature)} (+${lift.contribution.toFixed(2)} to the log-odds)${second ? ` and ${humanise(second.feature)} (+${second.contribution.toFixed(2)})` : ''}, neither of which translated into holders.`;
+      return `${opening} — the estimate rested on ${humanise(lift.feature)} (+${lift.contribution.toFixed(2)} to the log-odds)${second ? ` and ${humanise(second.feature)} (+${second.contribution.toFixed(2)})` : ''}, and this time holders did not follow.`;
+    }
+    const drag = negatives[0];
+    if (drag) {
+      return `${opening} — no feature argued for it; the model had already marked it down for ${humanise(drag.feature)} (${drag.contribution.toFixed(2)} to the log-odds) and still landed too high, so the starting base rate was the generous part.`;
     }
     return `${opening} — the estimate came from the base rate rather than from any strong feature, and the base rate was too generous for this launch.`;
   }
@@ -1190,7 +1519,7 @@ function explainOutcome(sample: LabelledSample, peakHolders: number | null): str
   // The call was directionally right.
   const carrier = y === 1 ? positives[0] : negatives[0];
   if (carrier) {
-    return `${opening} — the call was right, and ${humanise(carrier.feature)} (${carrier.contribution >= 0 ? '+' : ''}${carrier.contribution.toFixed(2)} to the log-odds) was what drove it.`;
+    return `${opening} — the call was right, and ${humanise(carrier.feature)} (${carrier.contribution >= 0 ? '+' : ''}${carrier.contribution.toFixed(2)} to the log-odds) was the largest single term behind it. That is what the model weighted, not a demonstrated cause of the outcome.`;
   }
   return `${opening} — the call was right, though it came from the base rate rather than from any particular feature.`;
 }
@@ -1232,16 +1561,22 @@ function movedWeights(bundle: SuccessModelBundle, topK: number): WeightShift[] {
   return shifts.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, topK);
 }
 
+/**
+ * Wording note: every string here describes what the *model* now weights, on the
+ * launches it has seen. None of it claims the feature causes the outcome — the
+ * platform partly chose what to launch using these same features, so the
+ * association is entangled with its own selection.
+ */
 function readWeightShift(label: string, headLabel: string, before: number, after: number): string {
   const range = `${before.toFixed(2)} → ${after.toFixed(2)}`;
   if (before >= 0 && after < 0) {
-    return `${label} has flipped sign for ${headLabel}: the model now reads it as a warning rather than a plus (${range}).`;
+    return `${label} has flipped sign for ${headLabel}: on the launches seen so far the model now reads it as a warning rather than a plus (${range}). An association in launched tokens, not a demonstrated cause.`;
   }
   if (before <= 0 && after > 0) {
-    return `${label} has flipped sign for ${headLabel}: what the priors treated as a drag now reads as a positive (${range}).`;
+    return `${label} has flipped sign for ${headLabel}: what the priors treated as a drag now reads as a positive on the launches seen so far (${range}). An association in launched tokens, not a demonstrated cause.`;
   }
   const stronger = Math.abs(after) > Math.abs(before);
-  return `${label} counts ${stronger ? 'more' : 'less'} toward ${headLabel} than the priors assumed (${range}).`;
+  return `${label} counts ${stronger ? 'more' : 'less'} toward ${headLabel} than the priors assumed, on the launches seen so far (${range}).`;
 }
 
 /**
@@ -1295,8 +1630,12 @@ function trustStatement(
 
   parts.push(
     baseRates.sufficient
-      ? 'Base rates in use are measured from realised launches rather than assumed.'
-      : 'Base rates in use are still the encoded priors; not enough outcomes have been measured to replace them.',
+      ? `Base rates in use are measured from realised launches (${baseRates.n} labelled) rather than assumed, shrunk toward the priors so a thin head cannot swing them.`
+      : `Base rates in use are still the encoded priors; ${baseRates.n} labelled launch${baseRates.n === 1 ? '' : 'es'} is not enough to replace them, and a prior is an assumption reported with n = 0.`,
+  );
+
+  parts.push(
+    'Two limits apply to all of the above. Only concepts the quality gate approved were ever launched, so every number describes approved launches rather than concepts in general. And the learned weights are associations in data the platform selected on: a feature can look predictive because it helped decide what to launch, not because it causes buyers to arrive.',
   );
 
   return parts.join(' ');

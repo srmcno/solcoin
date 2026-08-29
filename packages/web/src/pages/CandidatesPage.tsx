@@ -364,9 +364,15 @@ export function CandidatesPage() {
               title={empty.title}
               description={empty.description}
               action={
-                <Link className="btn btn-ghost" to="/opportunities">
-                  View opportunities
-                </Link>
+                status === 'launched' ? (
+                  <Link className="btn btn-ghost" to="/tokens">
+                    View live tokens
+                  </Link>
+                ) : (
+                  <Link className="btn btn-ghost" to="/opportunities">
+                    View opportunities
+                  </Link>
+                )
               }
             />
           ) : (

@@ -204,7 +204,7 @@ interface MergedTag {
   url: string | null;
   instances: Set<string>;
   bestRank: number;
-  /** UTC day (ms) -> summed counters across every instance that saw the tag. */
+  /** UTC day (ms) -> best single-instance counters for that day. See `mergeDays`. */
   byDay: Map<number, { uses: number; accounts: number }>;
 }
 
@@ -231,12 +231,32 @@ interface MergedStatus {
   replies: number;
 }
 
-function accumulate(target: Map<number, { uses: number; accounts: number }>, points: readonly HistoryPoint[]): void {
+/**
+ * Fold one instance's daily counters into the merged per-day view.
+ *
+ * The counters are combined with `max`, not `sum`, for the same reason the
+ * status counters below are: an instance counts every post carrying the tag
+ * that it has federated, and the large instances federate the same posts.
+ * Verified live on 2026-08-29, `#BicycleMovies` reported 574 uses on
+ * mastodon.social and 571 on mstdn.social for the same UTC day — one set of
+ * posts, counted twice. Summing published 1,145 for it, and worse, made
+ * `rawValue` scale with the *number of instances configured*: because those
+ * daily values are persisted as observations, an operator adding an instance
+ * would have manufactured a step change across the stored history of every tag
+ * at once, indistinguishable from a real surge.
+ *
+ * `max` is a lower bound on the true union. It can understate a tag whose
+ * activity is genuinely split across communities, which is the honest failure
+ * direction — it never invents activity that no single instance observed.
+ * Breadth is not lost either: it is reported separately and truthfully as
+ * `instanceCount`.
+ */
+function mergeDays(target: Map<number, { uses: number; accounts: number }>, points: readonly HistoryPoint[]): void {
   for (const p of points) {
     const existing = target.get(p.t);
     if (existing) {
-      existing.uses += p.uses;
-      existing.accounts += p.accounts;
+      existing.uses = Math.max(existing.uses, p.uses);
+      existing.accounts = Math.max(existing.accounts, p.accounts);
     } else {
       target.set(p.t, { uses: p.uses, accounts: p.accounts });
     }
@@ -344,10 +364,10 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
           existing.bestRank = rank;
           existing.displayName = name;
         }
-        accumulate(existing.byDay, points);
+        mergeDays(existing.byDay, points);
       } else {
         const byDay = new Map<number, { uses: number; accounts: number }>();
-        accumulate(byDay, points);
+        mergeDays(byDay, points);
         into.set(key, {
           displayName: name,
           url: asString(item['url']),
@@ -375,10 +395,10 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
       if (existing) {
         existing.instances.add(host);
         if (rank < existing.bestRank) existing.bestRank = rank;
-        accumulate(existing.byDay, points);
+        mergeDays(existing.byDay, points);
       } else {
         const byDay = new Map<number, { uses: number; accounts: number }>();
-        accumulate(byDay, points);
+        mergeDays(byDay, points);
         into.set(url, {
           url,
           title,
@@ -447,7 +467,10 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
       rawValue: latest?.uses ?? 0,
       observedAt,
       history: points.map((p) => ({ t: p.t, v: p.uses })),
-      keywords: hashtagKeywords(tag.displayName),
+      // Derived from the sanitised name, not the raw one: a tag is external
+      // text like any other, and keywords are persisted and reused as search
+      // terms, so control and invisible characters must not survive into them.
+      keywords: hashtagKeywords(displayName),
       metadata: {
         kind: 'tag',
         instances: [...tag.instances],
@@ -556,15 +579,6 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
     return signal;
   }
 
-  function summariseHealth(): { state: HealthState; reachable: number } {
-    const reachable = instances.filter((i) => i.lastSuccessAt !== undefined && (i.lastFailureAt ?? 0) <= i.lastSuccessAt).length;
-    if (!configured) return { state: 'unconfigured', reachable: 0 };
-    if (reachable === 0) return { state: 'down', reachable };
-    // Partial reachability is explicitly *not* 'down': the merged tag list is
-    // still usable, just drawn from a narrower slice of the network.
-    return { state: reachable === instances.length ? 'ok' : 'degraded', reachable };
-  }
-
   return {
     id: 'mastodon',
     label: 'Mastodon (Fediverse trends)',
@@ -647,9 +661,8 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
       const observedAt = clock.now();
 
       const tagSignals = [...tags.values()]
-        .map((tag, i) => ({ tag, i }))
-        .sort((a, b) => latestUses(b.tag.byDay) - latestUses(a.tag.byDay) || a.tag.bestRank - b.tag.bestRank)
-        .map(({ tag }, index) => tagToSignal(tag, index + 1, observedAt));
+        .sort((a, b) => latestUses(b.byDay) - latestUses(a.byDay) || a.bestRank - b.bestRank)
+        .map((tag, index) => tagToSignal(tag, index + 1, observedAt));
 
       const linkSignals = [...links.values()]
         .sort((a, b) => latestUses(b.byDay) - latestUses(a.byDay) || a.bestRank - b.bestRank)
@@ -711,9 +724,10 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
       const tag = merged.get(tagName.toLowerCase()) ?? [...merged.values()][0];
       if (!tag) return null;
 
-      // Confirmed against live instances: `/api/v1/tags/{name}` answers 200 with
-      // a synthesised record — real id, real url, seven days of zeroes — for a
-      // tag nobody has ever posted. Returning that would hand downstream a
+      // Confirmed against live instances (mastodon.social, 2026-08-29):
+      // `/api/v1/tags/{name}` answers 200 with a synthesised record — empty id,
+      // a well-formed url, seven days of `"uses":"0"` — for a tag nobody has
+      // ever posted. Returning that would hand downstream a
       // fabricated "measured zero" indistinguishable from a genuine reading, so
       // a tag with no recorded activity in the whole window is reported as
       // absent instead.

@@ -1,6 +1,6 @@
 import { dirname } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { TIME, lamportsToSol, wilsonInterval, type HealthState } from '@solcoin/shared';
+import { TIME, lamportsToSol, median, shrinkToPrior, wilsonInterval, type HealthState } from '@solcoin/shared';
 import { safeErrorText } from '../core/errors.js';
 import { newId } from '../core/ids.js';
 import { parseJson, stringify } from '../core/json.js';
@@ -28,10 +28,39 @@ import type { SettingsService } from './settings.service.js';
 
 export type HealthComponentKind = 'provider' | 'database' | 'scheduler' | 'disk' | 'wallet' | 'clock';
 
-/** Availability over the recorded history of a provider, with honest bounds. */
+/**
+ * Availability over the recorded history of a provider, with honest bounds.
+ *
+ * Never a bare percentage: a rate is only ever published with the sample size
+ * it came from, a 95% interval, the fleet-wide rate it was shrunk toward, and
+ * a statement of what would bias it.
+ */
 export type Availability =
   | { sufficient: false; n: number; reason: string }
-  | { sufficient: true; n: number; point: number; lower: number; upper: number };
+  | {
+      sufficient: true;
+      /** Observations (successes + failures) behind this estimate. */
+      n: number;
+      /** Raw successes / n for this provider alone. Unshrunk, so 20/20 reads 1. */
+      observed: number;
+      /**
+       * 95% Wilson bounds on `observed`. They bound the *raw* rate; they are
+       * deliberately not an interval around `point`.
+       */
+      observedLower: number;
+      observedUpper: number;
+      /**
+       * The estimate to rank providers by: `observed` shrunk toward
+       * `fleet.rate` in proportion to how little evidence this provider has.
+       * On a thin sample it sits outside [observedLower, observedUpper] — that
+       * is the shrinkage working, not an inconsistency.
+       */
+      point: number;
+      /** Pooled rate across every registered provider, and its sample size. */
+      fleet: { rate: number; n: number };
+      /** Why this number is weaker evidence than a percentage looks. */
+      caveat: string;
+    };
 
 export interface HealthComponent {
   id: string;
@@ -87,6 +116,33 @@ const CIRCUIT_MAX_COOLDOWN_MS = 15 * TIME.minute;
  * off three samples is worse than no badge.
  */
 const MIN_AVAILABILITY_SAMPLES = 20;
+
+/**
+ * Pseudo-observations of the fleet-wide rate mixed into each provider's own
+ * rate before it is published as `point`.
+ *
+ * Availabilities are read side by side, and an unshrunk 20/20 reads as a
+ * flawless provider next to a 5,000-observation one at 99.5%. It is not
+ * flawless, it is barely measured. At this strength a provider needs roughly
+ * ten observations of its own before its record outweighs the fleet's.
+ */
+const AVAILABILITY_PRIOR_STRENGTH = 10;
+
+/**
+ * Attached to every published availability. Two things make this number weaker
+ * than a percentage looks, and both are structural rather than incidental:
+ * the counters never reset, and the sample selects itself.
+ */
+const AVAILABILITY_CAVEAT =
+  'Cumulative over the whole recorded history, not a rate over a recent window, and it mixes synthetic probes with real request outcomes. It is also biased upward by selection: while a provider is failing its circuit opens and the client refuses to send, so failures stop being counted for exactly as long as it is broken. Read it as a coarse reliability ranking, never as an SLA measurement.';
+
+/**
+ * Latency probes taken per database check. A single reading is n = 1 and query
+ * latency is heavily right-skewed, so one GC pause or one fsync would otherwise
+ * be enough to flip the component to `degraded`. The median decides the state;
+ * the slowest reading is reported next to it so the tail is never hidden.
+ */
+const DB_LATENCY_SAMPLES = 5;
 
 /** A job overdue by more than this multiple of its own interval is late. */
 const OVERDUE_INTERVAL_MULTIPLE = 2;
@@ -238,7 +294,11 @@ export class HealthService {
     // allSettled + per-probe timeout: one hung provider cannot stall the check.
     const results = await Promise.allSettled(providers.map((p) => withTimeout(p.healthCheck(), PROBE_TIMEOUT_MS, p.id)));
 
-    return providers.map((provider, index) => {
+    // Two passes. The first persists each probe and collects its counters; the
+    // second builds the components, because a provider's availability is only
+    // interpretable against the pooled rate of the whole fleet and that is not
+    // known until every provider has been folded in.
+    const probed = providers.map((provider, index) => {
       const settled = results[index];
       const checkedAt = this.now();
 
@@ -257,9 +317,16 @@ export class HealthService {
         };
       }
 
-      const previous = this.persistProviderStatus(status, checkedAt);
-      return this.toComponent(status, previous, checkedAt);
+      return { status, counters: this.persistProviderStatus(status, checkedAt), checkedAt };
     });
+
+    const fleetSuccesses = probed.reduce((total, p) => total + p.counters.successCount, 0);
+    const fleetTrials = probed.reduce((total, p) => total + p.counters.successCount + p.counters.failureCount, 0);
+    // With no observations anywhere there is no fleet rate to shrink toward.
+    // Assuming 1.0 would invent optimism, so fall back to the uninformative 0.5.
+    const fleet = { rate: fleetTrials > 0 ? fleetSuccesses / fleetTrials : 0.5, n: fleetTrials };
+
+    return probed.map((p) => this.toComponent(p.status, p.counters, p.checkedAt, fleet));
   }
 
   /**
@@ -379,6 +446,7 @@ export class HealthService {
     status: ProviderStatus,
     counters: { successCount: number; failureCount: number; consecutiveFailures: number; circuitOpenUntil: number | null },
     checkedAt: number,
+    fleet: { rate: number; n: number },
   ): HealthComponent {
     const trials = counters.successCount + counters.failureCount;
     // A rate off a handful of probes is not a measurement. Report the sample
@@ -388,11 +456,23 @@ export class HealthService {
         ? {
             sufficient: false,
             n: trials,
-            reason: `Only ${trials} recorded probe${trials === 1 ? '' : 's'}; at least ${MIN_AVAILABILITY_SAMPLES} are needed before an availability rate means anything.`,
+            reason: `Only ${trials} recorded observation${trials === 1 ? '' : 's'}; at least ${MIN_AVAILABILITY_SAMPLES} are needed before an availability rate means anything, so no rate is reported for this provider.`,
           }
         : (() => {
             const interval = wilsonInterval(counters.successCount, trials);
-            return { sufficient: true, n: trials, point: interval.point, lower: interval.lower, upper: interval.upper };
+            return {
+              sufficient: true as const,
+              n: trials,
+              observed: interval.point,
+              observedLower: interval.lower,
+              observedUpper: interval.upper,
+              // Shrunk toward the fleet so providers with very different
+              // sample sizes can be compared without the least-measured one
+              // topping the list.
+              point: shrinkToPrior(interval.point, trials, fleet.rate, AVAILABILITY_PRIOR_STRENGTH),
+              fleet,
+              caveat: AVAILABILITY_CAVEAT,
+            };
           })();
 
     const detail =
@@ -432,30 +512,52 @@ export class HealthService {
 
   private checkDatabase(): HealthComponent {
     const checkedAt = this.now();
-    const started = performance.now();
     try {
       // Trivial but real: it touches the b-tree rather than only the parser.
-      this.db.$raw.prepare('SELECT COUNT(*) AS n FROM sqlite_schema').get();
-      const latencyMs = performance.now() - started;
+      // Sampled rather than timed once, because query latency is right-skewed
+      // and a single reading cannot distinguish a slow database from one
+      // unlucky pause.
+      const probe = this.db.$raw.prepare('SELECT COUNT(*) AS n FROM sqlite_schema');
+      const samples: number[] = [];
+      for (let i = 0; i < DB_LATENCY_SAMPLES; i++) {
+        const started = performance.now();
+        probe.get();
+        samples.push(performance.now() - started);
+      }
+      const medianMs = median(samples);
+      const worstMs = Math.max(...samples);
 
       const size = this.db.$raw
         .prepare('SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()')
         .get() as { bytes: number } | undefined;
       const bytes = size?.bytes ?? 0;
 
-      const slow = latencyMs > DB_LATENCY_WARN_MS;
+      // The median decides; the tail is reported alongside so a database that
+      // is usually fast but occasionally stalls is still visible.
+      const slow = medianMs > DB_LATENCY_WARN_MS;
+      const tailHeavy = !slow && worstMs > DB_LATENCY_WARN_MS;
       return {
         id: 'database',
         label: 'Database',
         kind: 'database',
         state: slow ? 'degraded' : 'ok',
         detail: slow
-          ? `A trivial query took ${latencyMs.toFixed(1)} ms, above the ${DB_LATENCY_WARN_MS} ms threshold. The database file is ${formatBytes(bytes)}; check for a long-running write or a slow disk.`
-          : `Responding in ${latencyMs.toFixed(1)} ms. Database file is ${formatBytes(bytes)}.`,
-        latencyMs: Math.round(latencyMs),
+          ? `The median of ${DB_LATENCY_SAMPLES} trivial queries took ${medianMs.toFixed(1)} ms (slowest ${worstMs.toFixed(1)} ms), above the ${DB_LATENCY_WARN_MS} ms threshold. The database file is ${formatBytes(bytes)}; check for a long-running write or a slow disk.`
+          : `Median ${medianMs.toFixed(1)} ms over ${DB_LATENCY_SAMPLES} trivial queries, slowest ${worstMs.toFixed(1)} ms. Database file is ${formatBytes(bytes)}.${
+              tailHeavy
+                ? ` The slowest reading is past the ${DB_LATENCY_WARN_MS} ms threshold even though the median is not, so the database occasionally stalls; ${DB_LATENCY_SAMPLES} samples is too few to say how often.`
+                : ''
+            }`,
+        latencyMs: Math.round(medianMs),
         // Nothing works without the database, including recording that nothing works.
         essential: true,
-        metrics: { fileBytes: bytes, fileMegabytes: Number((bytes / 1_048_576).toFixed(2)) },
+        metrics: {
+          fileBytes: bytes,
+          fileMegabytes: Number((bytes / 1_048_576).toFixed(2)),
+          latencySamples: DB_LATENCY_SAMPLES,
+          latencyMedianMs: Number(medianMs.toFixed(2)),
+          latencyMaxMs: Number(worstMs.toFixed(2)),
+        },
         checkedAt,
       };
     } catch (e) {
@@ -797,7 +899,7 @@ function summarise(components: HealthComponent[]): string {
     // Local components are only worth a mention when they are not fine; the
     // database latency is the exception because it is the number most often wanted.
     if (component.id === 'database' && component.state === 'ok') {
-      parts.push(`database ${component.latencyMs ?? 0} ms`);
+      parts.push(`database median ${component.latencyMs ?? 0} ms over ${DB_LATENCY_SAMPLES} probes`);
     } else if (component.state !== 'ok' && component.state !== 'unconfigured') {
       parts.push(`${component.label.toLowerCase()} ${component.state}`);
     }

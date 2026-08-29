@@ -81,8 +81,7 @@ export class SettingsService {
       });
     }
 
-    const next = clampSettings(parsed.data);
-    this.assertPhaseAllowsAutonomy(next);
+    const next = this.assertPhaseAllowsAutonomy(clampSettings(parsed.data), current);
 
     const changed = diffPaths(current as unknown as Record<string, unknown>, next as unknown as Record<string, unknown>);
     if (changed.length === 0) return { settings: current, changed: [] };
@@ -184,15 +183,25 @@ export class SettingsService {
    * The phased-activation ladder.
    *
    * Higher phases unlock more autonomy, and the mapping is enforced rather than
-   * advisory: reaching phase 4 is the only way `autonomy.launch = auto` can be
-   * set at all.
+   * advisory: reaching phase 4 is the only way any capability can be set to
+   * `auto`, which is the level where the platform acts without a human.
+   *
+   * `approve` is permitted from phase 1 because it still requires a person to
+   * click, so it is safe at every phase — the ladder exists to gate unattended
+   * action, not to make the approval queue unusable during research.
+   *
+   * Enforcement deliberately compares against the *current* value: a change is
+   * rejected only when it raises a capability above the ceiling. A value that
+   * already exceeds it (which a phase downgrade can produce) is clamped down
+   * instead. Rejecting outright would leave an operator unable to change any
+   * setting at all until they first fixed the one that was already wrong.
    */
-  private assertPhaseAllowsAutonomy(next: PlatformSettings): void {
+  private assertPhaseAllowsAutonomy(next: PlatformSettings, current: PlatformSettings): PlatformSettings {
     const phase = next.execution.phase;
     const network = next.execution.network;
 
     const maxAutonomy: Record<OperatingPhase, AutonomyLevel> = {
-      phase1_research: 'suggest',
+      phase1_research: 'approve',
       phase2_devnet: 'approve',
       phase3_mainnet_approval: 'approve',
       phase4_limited_autonomous: 'auto',
@@ -215,14 +224,31 @@ export class SettingsService {
 
     const rank: Record<AutonomyLevel, number> = { off: 0, suggest: 1, approve: 2, auto: 3 };
     const ceiling = rank[maxAutonomy[phase]];
-    for (const capability of ['launch', 'fee_collection', 'wallet_transfer'] as const) {
-      if (rank[next.autonomy[capability]] > ceiling) {
+    const clamped = structuredClone(next);
+
+    for (const capability of ['launch', 'fee_collection', 'wallet_transfer', 'social'] as const) {
+      const requested = rank[next.autonomy[capability]];
+      if (requested <= ceiling) continue;
+
+      const wasAlreadyAbove = rank[current.autonomy[capability]] > ceiling;
+      const isBeingRaised = requested > rank[current.autonomy[capability]];
+
+      if (isBeingRaised || !wasAlreadyAbove) {
         throw new AppError(
           'forbidden',
-          `Autonomy "${next.autonomy[capability]}" for ${capability} exceeds what ${phase} allows (maximum "${maxAutonomy[phase]}"). Advance the operating phase deliberately if this is intended.`,
+          `Autonomy "${next.autonomy[capability]}" for ${capability.replace(/_/g, ' ')} exceeds what ${phase} allows (maximum "${maxAutonomy[phase]}"). Advance the operating phase deliberately if this is intended.`,
         );
       }
+      // Pre-existing over-reach, untouched by this patch: bring it down to the
+      // ceiling rather than blocking an unrelated change.
+      clamped.autonomy[capability] = maxAutonomy[phase];
+      this.log.warn(
+        { capability, from: next.autonomy[capability], to: maxAutonomy[phase], phase },
+        'reduced an autonomy level that exceeded the current phase ceiling',
+      );
     }
+
+    return clamped;
   }
 
   invalidate(): void {

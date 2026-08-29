@@ -16,17 +16,24 @@ import type { ProviderStatus, RawTrendSignal, TrendProvider } from '../types.js'
  * from a population that has essentially no overlap with the Fediverse — which
  * is why SOURCE_INDEPENDENCE weights it at 0.95.
  *
- * Two endpoints, two different agent filters, and the difference matters:
+ * Two endpoints, and the agent filter behind them had to be established by
+ * measurement rather than from the docs:
  *
- *   - the `top` list is `all-access` with **no agent filter**, so its counts
- *     include automated traffic;
+ *   - the `top` list takes no `agent` path segment at all, so its filtering is
+ *     undocumented at the call site;
  *   - the `per-article` series is requested with `agent=user`, which strips
  *     spiders and known bots.
  *
- * They are therefore not the same quantity. `rawValue` carries the ranked
- * top-list figure (always available, comparable across articles on the day) and
- * `history` carries the bot-free series. Every velocity statistic is computed
- * *within* the history series so the two are never mixed.
+ * Checked against live data for 2026-08-28, the top-list figure equals the
+ * `agent=user` per-article figure exactly — Dolly_Parton 646,774, Toxic_(2026_film)
+ * 572,046, Tim_Curry 471,537, Peter_Cullen 362,893, .xyz 304,832 — while
+ * `agent=all-agents` for the same articles runs 3-6% higher (679,928 / 608,650 /
+ * 489,241 / 380,495). The top list is therefore already bot-filtered and is the
+ * same quantity as the history series, which is what makes it sound to publish
+ * `rawValue` from the top list and `history` from the per-article call: a
+ * downstream velocity taken across both is comparing like with like. Should
+ * Wikimedia ever change that, the two would silently diverge, so the agent
+ * behind each number is recorded in metadata rather than assumed.
  */
 
 const SOURCE: TrendSourceId = 'wikipedia';
@@ -180,11 +187,25 @@ function humanTitle(article: string): string {
 }
 
 /**
+ * `dolly_parton` -> `Dolly_Parton`, the spelling Wikipedia uses for most
+ * multi-word subjects. Only the leading character of each word is touched, so
+ * interior capitals survive (`macos_sequoia` -> `Macos_Sequoia`, and
+ * `iPhone_16` -> `IPhone_16`, which is what Wikipedia's own URL form uses).
+ */
+function titleCase(underscored: string): string {
+  return underscored.replace(/(^|_)(\p{L})/gu, (_match, separator: string, ch: string) => separator + ch.toUpperCase());
+}
+
+/**
  * Keywords drop the parenthetical disambiguator, which is Wikipedia editorial
  * bookkeeping rather than part of what people are actually searching for.
+ *
+ * Takes the already-sanitised human title rather than the raw article id: an
+ * article title is external text, and keywords are persisted and reused as
+ * search terms, so nothing unsanitised may reach them.
  */
-function articleKeywords(article: string): string[] {
-  const base = humanTitle(article).replace(/\s*\([^)]*\)\s*$/, '');
+function articleKeywords(humanisedTitle: string): string[] {
+  const base = humanisedTitle.replace(/\s*\([^)]*\)\s*$/, '');
   const seen = new Set<string>();
   for (const word of base.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
     if (word.length > 1) seen.add(word);
@@ -291,26 +312,32 @@ export function createWikipediaProvider(deps: WikipediaProviderDeps = {}): Trend
     series: ReadonlyArray<{ t: number; v: number }>,
     observedAt: number,
   ): RawTrendSignal {
+    const title = sanitiseExternalText(humanTitle(entry.article), 300);
     const signal: RawTrendSignal = {
       source: SOURCE,
       // The underscored form is the API's own identifier, so it is the stable
       // key for deduplication across runs.
       externalId: entry.article,
-      title: sanitiseExternalText(humanTitle(entry.article), 300),
+      title,
       url: `https://${project.split('.')[0] ?? 'en'}.wikipedia.org/wiki/${encodeURIComponent(entry.article)}`,
       rawValue: entry.views,
       // Pageviews are, to a good approximation, people who arrived at the page.
       audience: entry.views,
       rank: entry.rank,
       observedAt,
-      keywords: articleKeywords(entry.article),
+      keywords: articleKeywords(title),
       metadata: {
         article: entry.article,
         project,
         /** The day the top-list figure describes, which is not `observedAt`. */
         dataDayMs: dayMs,
-        /** all-agents, matching the top endpoint. */
-        viewsAgent: 'all-agents',
+        /**
+         * Both numbers are bot-filtered. The top endpoint exposes no agent
+         * parameter, but its counts match `agent=user` exactly on every article
+         * spot-checked (see the header note), so labelling it `all-agents`
+         * would misdescribe the data rather than describe it.
+         */
+        viewsAgent: 'user',
         historyAgent: 'user',
       },
     };
@@ -329,6 +356,12 @@ export function createWikipediaProvider(deps: WikipediaProviderDeps = {}): Trend
     endDayMs: number,
     signal?: AbortSignal,
   ): Promise<Array<{ t: number; v: number }>> {
+    // `encodeURIComponent` does not escape dots, so a title of `.` or `..`
+    // survives into the path and `new URL()` resolves the segment away — the
+    // request would silently go to a *different* endpoint (dropping the `user`
+    // segment) instead of the one this function claims to call. Neither string
+    // is a real article title, so there is nothing to ask for.
+    if (article === '.' || article === '..') return [];
     const startMs = endDayMs - (HISTORY_DAYS - 1) * DAY_MS;
     const payload = await get(seriesPath(article, startMs, endDayMs), signal);
     return parseSeries(payload);
@@ -411,12 +444,32 @@ export function createWikipediaProvider(deps: WikipediaProviderDeps = {}): Trend
       if (!trimmed) return null;
 
       const underscored = trimmed.replace(/\s+/g, '_');
-      // Wikipedia titles are case-sensitive after the first character, which is
-      // always capitalised. Trying the capitalised form first resolves the
-      // common case ("labubu" -> "Labubu"); the verbatim form is the fallback
-      // for titles that genuinely start lowercase (".xyz", "iPhone").
-      const capitalised = underscored.charAt(0).toUpperCase() + underscored.slice(1);
-      const attempts = capitalised === underscored ? [underscored] : [capitalised, underscored];
+      /*
+       * Wikipedia capitalises the first character of a title and is
+       * case-sensitive after it, so a term can spell several *different pages*:
+       * the canonical article plus redirects, each with its own pageview
+       * series. The pageviews API does not follow redirects, and a redirect is
+       * not an empty page — it accumulates its own (much smaller) traffic.
+       *
+       * Measured 2026-08-29: `Dolly_parton` reports 1,516 views for the day
+       * `Dolly_Parton` reports 646,774. Taking the first spelling that returns
+       * data — only the leading character capitalised — therefore measured the
+       * redirect and understated the subject by a factor of 425 while looking
+       * like a confident reading. Every plausible spelling is now fetched and
+       * the busiest one wins: the canonical article is by construction the page
+       * the traffic lands on. Requests are capped at three and are cached, so
+       * this costs at most two extra calls against a 100/min budget.
+       *
+       * The residual limit is stated rather than papered over: a redirect whose
+       * title differs by more than casing ("Labubu doll" -> "Labubu") is not
+       * resolved, because this API has no title-resolution endpoint. Such a
+       * term measures as absent, which is honest, not as zero.
+       */
+      const attempts = [
+        underscored.charAt(0).toUpperCase() + underscored.slice(1),
+        titleCase(underscored),
+        underscored,
+      ].filter((a, i, all) => a.length > 0 && all.indexOf(a) === i && !isAdministrative(a));
 
       const todayUtc = Date.UTC(
         clock.date().getUTCFullYear(),
@@ -426,23 +479,33 @@ export function createWikipediaProvider(deps: WikipediaProviderDeps = {}): Trend
       // Same one-day publication lag as the top list.
       const endDayMs = todayUtc - DAY_MS;
 
-      for (const article of attempts) {
-        if (isAdministrative(article)) continue;
-        const series = await fetchSeries(article, endDayMs, options.signal);
-        if (series.length === 0) continue;
+      const candidates = await Promise.all(
+        attempts.map(async (article) => {
+          const series = await fetchSeries(article, endDayMs, options.signal);
+          // Total over the window, not the latest day: a redirect can out-poll
+          // its target on a single quiet day, but not across a month.
+          return { article, series, total: series.reduce((acc, p) => acc + p.v, 0) };
+        }),
+      );
 
-        const latest = series[series.length - 1];
-        if (!latest) continue;
-
-        // measure() has no top-list entry, so rawValue comes from the same
-        // agent=user series as the history — consistent within this signal,
-        // and metadata records which agent filter produced it.
-        return buildSignalFromSeries(article, series, latest, clock.now(), project);
+      let best: (typeof candidates)[number] | null = null;
+      for (const candidate of candidates) {
+        // A title that exists but has no recorded views in the whole window is
+        // not evidence of anything, and a zero would be indistinguishable
+        // downstream from a real reading.
+        if (candidate.total <= 0) continue;
+        if (!best || candidate.total > best.total) best = candidate;
       }
 
+      const latest = best?.series[best.series.length - 1];
       // No article, or an article with no recorded views: say so rather than
       // returning a zero that downstream cannot distinguish from real data.
-      return null;
+      if (!best || !latest) return null;
+
+      // measure() has no top-list entry, so rawValue comes from the same
+      // agent=user series as the history — consistent within this signal,
+      // and metadata records which agent filter produced it.
+      return buildSignalFromSeries(best.article, best.series, latest, clock.now(), project);
     },
   };
 }
@@ -455,16 +518,17 @@ function buildSignalFromSeries(
   observedAt: number,
   project: string,
 ): RawTrendSignal {
+  const title = sanitiseExternalText(humanTitle(article), 300);
   const signal: RawTrendSignal = {
     source: SOURCE,
     externalId: article,
-    title: sanitiseExternalText(humanTitle(article), 300),
+    title,
     url: `https://${project.split('.')[0] ?? 'en'}.wikipedia.org/wiki/${encodeURIComponent(article)}`,
     rawValue: latest.v,
     audience: latest.v,
     observedAt,
     history: series.map((p) => ({ t: p.t, v: p.v })),
-    keywords: articleKeywords(article),
+    keywords: articleKeywords(title),
     metadata: {
       article,
       project,

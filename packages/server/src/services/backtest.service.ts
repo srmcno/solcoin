@@ -166,10 +166,15 @@ export interface ModelledProjection {
   extrapolated: boolean;
   modelVersion: string;
   modelTrainedOnOutcomes: number;
-  modelledFeesSol: number;
-  modelledMedianFeesSol: number;
+  /**
+   * Null — not zero — when no unobserved candidate carried a usable feature
+   * vector. Zero would read as "the model expects nothing from them", which is
+   * a claim; null says the model was never able to form one.
+   */
+  modelledFeesSol: number | null;
+  modelledMedianFeesSol: number | null;
   modelledCostSol: number;
-  modelledNetSol: number;
+  modelledNetSol: number | null;
   caveats: string[];
 }
 
@@ -191,8 +196,13 @@ export interface ReplayResult {
   realisedNetSol: number;
   /** Per-launch realised net across the observed launches. Mean alone lies here. */
   realisedPerLaunch: SkewSummary | null;
-  /** Graduation rate among observed launches, as a Beta posterior, never a bare ratio. */
-  observedGraduationRate: { successes: number; n: number; mean: number; lower: number; upper: number };
+  /**
+   * Graduation rate among observed launches, as a Beta posterior, never a bare
+   * ratio. Null when nothing was observed: a posterior on zero trials is the
+   * prior, and returning the prior under a field named `observed…` would report
+   * an assumption as a measurement.
+   */
+  observedGraduationRate: { successes: number; n: number; mean: number; lower: number; upper: number } | null;
 
   launchesPerDay: number;
   rejectionReasonBreakdown: Record<string, number>;
@@ -218,8 +228,13 @@ export interface StrategyComparisonEntry {
   realisedNetSol: number;
   modelledNetSol: number | null;
   observedFraction: number;
-  /** Per-launch mean net shrunk toward the all-launch mean by sample size. */
-  shrunkMeanNetPerLaunchSol: number;
+  /**
+   * Per-launch mean net shrunk toward the all-launch mean by sample size. Null
+   * when this strategy has no observed launches at all: shrinkage on zero
+   * observations returns the global mean unchanged, which would print a
+   * plausible per-launch figure for a strategy that was never measured.
+   */
+  shrunkMeanNetPerLaunchSol: number | null;
   /**
    * True only when the clustered bootstrap separates this strategy from its
    * reference (the leader, or the runner-up for the leader itself) at 95%.
@@ -287,8 +302,12 @@ export interface SweepPoint {
   observedLaunches: number;
   realisedNetSol: number;
   observedFraction: number;
-  /** Shrunk toward the global per-launch mean; a 1-launch cell is not a signal. */
-  shrunkMeanNetPerLaunchSol: number;
+  /**
+   * Shrunk toward the global per-launch mean; a 1-launch cell is not a signal.
+   * Null at a threshold that produced no observed launches, so an empty cell in
+   * the sweep never renders as a number.
+   */
+  shrunkMeanNetPerLaunchSol: number | null;
   /** True when this point rests on too few observations to mean anything. */
   underpowered: boolean;
   caveats: string[];
@@ -474,11 +493,12 @@ export class BacktestService {
       realisedNetSol: realisedFeesSol - realisedCostSol,
       realisedPerLaunch: netValues.length > 0 ? summariseSkew(netValues) : null,
       // 1 graduation out of 3 launches is not a 33% graduation rate. The Beta
-      // posterior with a weak pessimistic prior keeps that honest.
-      observedGraduationRate: {
-        successes: graduations,
-        ...betaPosterior(graduations, observed.length, 1, 3),
-      },
+      // posterior with a weak pessimistic prior keeps that honest. With nothing
+      // observed at all there is no rate to report and the field is null.
+      observedGraduationRate:
+        observed.length > 0
+          ? { successes: graduations, ...betaPosterior(graduations, observed.length, 1, 3) }
+          : null,
 
       launchesPerDay: simulation.selected.length / windowDays,
       rejectionReasonBreakdown: simulation.rejectionReasonBreakdown,
@@ -557,8 +577,6 @@ export class BacktestService {
       const referenceObserved = reference?.result.ofWhichObserved ?? 0;
       const underpowered =
         observedCount < MIN_OBSERVED_FOR_COMPARISON || referenceObserved < MIN_OBSERVED_FOR_COMPARISON;
-
-      const meanNet = observedCount > 0 ? entry.result.realisedNetSol / observedCount : globalMeanNet;
 
       return {
         name: entry.name,

@@ -439,31 +439,109 @@ async function resolvesToPublicAddress(host: string): Promise<{ safe: boolean; r
   return { safe: true, reason: 'ok' };
 }
 
-/** 'private' covers loopback, link-local, RFC1918, CGNAT, multicast and reserved. */
+/**
+ * 'private' covers loopback, link-local, RFC1918, CGNAT, multicast and reserved,
+ * in both address families — including the IPv6 forms that embed an IPv4
+ * address, which are the ones an SSRF attempt actually reaches for.
+ */
 function classifyAddress(value: string): 'public' | 'private' | 'not-an-ip' {
   const v4 = parseIpv4(value);
   if (v4) return ipv4IsPrivate(v4) ? 'private' : 'public';
 
-  if (value.includes(':')) {
-    const v6 = value.toLowerCase();
-    // IPv4-mapped (::ffff:1.2.3.4) and NAT64 (64:ff9b::1.2.3.4) embed a v4
-    // address; the embedded address is the one that actually gets contacted.
-    const embedded = v6.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (embedded?.[1]) {
-      const inner = parseIpv4(embedded[1]);
-      if (inner) return ipv4IsPrivate(inner) ? 'private' : 'public';
-    }
-    if (v6 === '::' || v6 === '::1') return 'private';
-    // fc00::/7 unique-local, fe80::/10 link-local, ff00::/8 multicast.
-    if (/^f[cd][0-9a-f]{0,2}:/.test(v6)) return 'private';
-    if (/^fe[89ab][0-9a-f]?:/.test(v6)) return 'private';
-    if (/^ff[0-9a-f]{2}:/.test(v6)) return 'private';
-    // 2001:db8::/32 is the documentation range and must never be routed.
-    if (v6.startsWith('2001:db8:')) return 'private';
-    return 'public';
-  }
+  const v6 = parseIpv6(value);
+  if (v6) return ipv6IsPrivate(v6) ? 'private' : 'public';
 
   return 'not-an-ip';
+}
+
+/**
+ * Parse an IPv6 literal to its 16 bytes, or null if it is not one.
+ *
+ * Textual prefix matching is not good enough here, and the reason is specific:
+ * `new URL()` **re-serialises** an IPv6 host into its canonical hex form, so a
+ * URL written as `https://[::ffff:169.254.169.254]/` arrives at this function
+ * as `::ffff:a9fe:a9fe`. Any check that looks for a dotted quad in the string
+ * never fires on a URL-derived host, and the embedded metadata address sails
+ * through. Decoding to bytes is the only reading that survives that rewrite.
+ *
+ * Accepts `::` compression, an optional trailing dotted quad (the form
+ * `dns.lookup` returns for IPv4-mapped results) and a `%zone` suffix.
+ */
+function parseIpv6(value: string): number[] | null {
+  const raw = value.trim().toLowerCase();
+  if (!raw.includes(':')) return null;
+  const withoutZone = raw.split('%')[0] ?? '';
+  const halves = withoutZone.split('::');
+  if (halves.length > 2) return null;
+
+  const expand = (part: string): number[] | null => {
+    if (part === '') return [];
+    const groups = part.split(':');
+    const bytes: number[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i] ?? '';
+      if (i === groups.length - 1 && group.includes('.')) {
+        const quad = parseIpv4(group);
+        if (!quad) return null;
+        bytes.push(quad[0], quad[1], quad[2], quad[3]);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      const n = parseInt(group, 16);
+      bytes.push((n >> 8) & 0xff, n & 0xff);
+    }
+    return bytes;
+  };
+
+  const head = expand(halves[0] ?? '');
+  if (head === null) return null;
+  if (halves.length === 1) return head.length === 16 ? head : null;
+
+  const tail = expand(halves[1] ?? '');
+  if (tail === null) return null;
+  const fill = 16 - head.length - tail.length;
+  if (fill < 0) return null;
+  return [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
+/**
+ * Reserved and internal IPv6 space.
+ *
+ * The embedding prefixes are the dangerous ones and are handled first: an
+ * address in `::ffff:0:0/96`, `::/96`, `64:ff9b::/96` (NAT64) or `2002::/16`
+ * (6to4) carries an IPv4 address inside it, and that inner address is the one a
+ * connection actually reaches — which is exactly how `[::ffff:169.254.169.254]`
+ * becomes a route to cloud instance metadata.
+ */
+function ipv6IsPrivate(bytes: number[]): boolean {
+  const at = (i: number): number => bytes[i] ?? 0;
+  const embedded = (): [number, number, number, number] => [at(12), at(13), at(14), at(15)];
+  const leadingZeroes = (n: number): boolean => {
+    for (let i = 0; i < n; i++) if (at(i) !== 0) return false;
+    return true;
+  };
+
+  if (leadingZeroes(10)) {
+    // ::ffff:0:0/96 IPv4-mapped, and ::/96 — which also covers :: and ::1.
+    const mapped = at(10) === 0xff && at(11) === 0xff;
+    const compat = at(10) === 0 && at(11) === 0;
+    if (mapped || compat) return ipv4IsPrivate(embedded());
+  }
+  // 64:ff9b::/96 and 64:ff9b:1::/48 — NAT64 translation prefixes.
+  if (at(0) === 0x00 && at(1) === 0x64 && at(2) === 0xff && at(3) === 0x9b) return true;
+  // 2002::/16 6to4: bytes 2..5 are the embedded IPv4 tunnel endpoint.
+  if (at(0) === 0x20 && at(1) === 0x02) return ipv4IsPrivate([at(2), at(3), at(4), at(5)]);
+  // 2001:0000::/32 Teredo tunnels to an arbitrary IPv4 endpoint.
+  if (at(0) === 0x20 && at(1) === 0x01 && at(2) === 0x00 && at(3) === 0x00) return true;
+  // 2001:db8::/32 documentation range; must never be routed.
+  if (at(0) === 0x20 && at(1) === 0x01 && at(2) === 0x0d && at(3) === 0xb8) return true;
+  // fc00::/7 unique-local.
+  if ((at(0) & 0xfe) === 0xfc) return true;
+  // fe80::/10 link-local.
+  if (at(0) === 0xfe && (at(1) & 0xc0) === 0x80) return true;
+  // ff00::/8 multicast.
+  if (at(0) === 0xff) return true;
+  return false;
 }
 
 function parseIpv4(value: string): [number, number, number, number] | null {
@@ -532,7 +610,22 @@ export function parseFeed(xml: string): ParsedFeed {
   // Comments can legally contain anything, including fake <item> blocks.
   const doc = xml.replace(/<!--[\s\S]*?-->/g, '');
 
-  const isAtom = /<feed[\s>]/i.test(doc) || /<entry[\s>]/i.test(doc);
+  /**
+   * Decide the format from the root element, and only fall back to looking for
+   * an `<entry>` anywhere when neither root marker is present.
+   *
+   * The order matters: an RSS document may perfectly legally contain the
+   * literal text `<entry>` inside a CDATA description (a publisher syndicating
+   * HTML, or an article about XML), and treating that as an Atom marker made
+   * the extractor look for `<entry>` blocks in a document that has none —
+   * silently returning zero items for the whole feed rather than one bad item.
+   * Whichever root marker appears first wins, so the same trick cannot be
+   * played in the other direction from inside an Atom entry.
+   */
+  const rssAt = doc.search(/<rss[\s>]/i);
+  const feedAt = doc.search(/<feed[\s>]/i);
+  const isAtom =
+    feedAt >= 0 && (rssAt < 0 || feedAt < rssAt) ? true : rssAt >= 0 ? false : /<entry[\s>]/i.test(doc);
   const blockTag = isAtom ? 'entry' : 'item';
   const blocks = extractBlocks(doc, blockTag);
 

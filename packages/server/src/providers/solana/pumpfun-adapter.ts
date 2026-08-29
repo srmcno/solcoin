@@ -1,14 +1,6 @@
 import { createHash, hkdfSync } from 'node:crypto';
 import { Keypair, PublicKey, type TransactionInstruction } from '@solana/web3.js';
 import { NATIVE_MINT, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
-import {
-  OnlinePumpSdk,
-  PumpSdk,
-  ammCreatorVaultPda,
-  creatorVaultPda,
-  getBuyTokenAmountFromSolAmount,
-  newBondingCurve,
-} from '@pump-fun/pump-sdk';
 import BN from 'bn.js';
 import {
   CURVE_VAULT_RENT_LAMPORTS,
@@ -47,6 +39,24 @@ import type {
 /** Salt for deterministic mint derivation; changing it changes every derived mint. */
 const MINT_DERIVATION_INFO = 'solcoin/mint/v1';
 
+/**
+ * The pump.fun SDK is loaded lazily, on first on-chain use.
+ *
+ * Two reasons, both practical. It pulls in the Anchor runtime and several
+ * hundred kilobytes of IDL, none of which simulation mode needs, so a fresh
+ * install boots without paying for it. And its dependency chain contains
+ * CommonJS packages imported with named bindings, which some ESM toolchains
+ * cannot resolve statically — deferring the import keeps that problem confined
+ * to the code path that actually needs the SDK rather than breaking startup.
+ */
+type PumpSdkModule = typeof import('@pump-fun/pump-sdk');
+let sdkModule: Promise<PumpSdkModule> | null = null;
+
+function loadPumpSdk(): Promise<PumpSdkModule> {
+  sdkModule ??= import('@pump-fun/pump-sdk');
+  return sdkModule;
+}
+
 export interface PumpFunAdapterOptions {
   rpc: SolanaRpc;
   network: ExecutionNetwork;
@@ -66,8 +76,8 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
   readonly networks: ExecutionNetwork[] = ['devnet', 'mainnet'];
 
   private readonly log = componentLogger('pumpfun-adapter');
-  private readonly offline = new PumpSdk();
-  private online: OnlinePumpSdk | null = null;
+  private offline: InstanceType<PumpSdkModule['PumpSdk']> | null = null;
+  private online: InstanceType<PumpSdkModule['OnlinePumpSdk']> | null = null;
   private readonly now: () => number;
 
   constructor(private readonly options: PumpFunAdapterOptions) {
@@ -77,16 +87,26 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
     }
   }
 
-  private sdk(): OnlinePumpSdk {
-    // Built lazily so the adapter can be constructed before RPC is reachable,
-    // and rebuilt if the RPC pool fails over to a different endpoint.
-    if (!this.online) this.online = new OnlinePumpSdk(this.options.rpc.connection);
+  /** Built lazily so the adapter can be constructed before RPC is reachable. */
+  private async sdk(): Promise<InstanceType<PumpSdkModule['OnlinePumpSdk']>> {
+    if (!this.online) {
+      const { OnlinePumpSdk } = await loadPumpSdk();
+      this.online = new OnlinePumpSdk(this.options.rpc.connection);
+    }
     return this.online;
+  }
+
+  private async offlineSdk(): Promise<InstanceType<PumpSdkModule['PumpSdk']>> {
+    if (!this.offline) {
+      const { PumpSdk } = await loadPumpSdk();
+      this.offline = new PumpSdk();
+    }
+    return this.offline;
   }
 
   async ready(): Promise<{ ready: boolean; reason?: string }> {
     try {
-      const global = await this.sdk().fetchGlobal();
+      const global = await (await this.sdk()).fetchGlobal();
       if (!global) return { ready: false, reason: 'The pump.fun global config account could not be read.' };
       return { ready: true };
     } catch (e) {
@@ -132,11 +152,12 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
       );
     }
 
-    const global = await this.sdk().fetchGlobal();
+    const global = await (await this.sdk()).fetchGlobal();
     const instructions: TransactionInstruction[] = [];
 
     if (request.devBuyLamports > 0) {
-      const feeConfig = await this.sdk().fetchFeeConfig();
+      const { getBuyTokenAmountFromSolAmount, newBondingCurve } = await loadPumpSdk();
+      const feeConfig = await (await this.sdk()).fetchFeeConfig();
       const solAmount = new BN(request.devBuyLamports);
       // Compute the token amount the buy should yield at the curve's opening
       // price, then let slippage protect the actual execution.
@@ -152,7 +173,7 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
         amount: solAmount,
         quoteMint: NATIVE_MINT,
       });
-      const built = await this.offline.createV2AndBuyInstructions({
+      const built = await (await this.offlineSdk()).createV2AndBuyInstructions({
         global,
         mint,
         name: request.name,
@@ -167,7 +188,7 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
       instructions.push(...built);
     } else {
       instructions.push(
-        await this.offline.createV2Instruction({
+        await (await this.offlineSdk()).createV2Instruction({
           mint,
           name: request.name,
           symbol: request.symbol,
@@ -259,6 +280,7 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
    * transactions which cost more than they recover.
    */
   async getAccruedFees(creator: string): Promise<AccruedFees> {
+    const { ammCreatorVaultPda, creatorVaultPda } = await loadPumpSdk();
     const creatorKey = new PublicKey(creator);
     const curveVault = creatorVaultPda(creatorKey);
     const ammVaultAuthority = ammCreatorVaultPda(creatorKey);
@@ -304,7 +326,7 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
 
     // The SDK's helper emits both the bonding-curve claim and the AMM claim in
     // one instruction list, so a single transaction sweeps both vaults.
-    const instructions = await this.sdk().collectCoinCreatorFeeInstructions(creatorKey, creatorKey);
+    const instructions = await (await this.sdk()).collectCoinCreatorFeeInstructions(creatorKey, creatorKey);
 
     const estimatedCostLamports = estimateClaimCostLamports({ includeCurve: includesCurve, includeAmm: includesAmm });
 

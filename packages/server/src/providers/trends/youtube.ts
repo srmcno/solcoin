@@ -254,9 +254,11 @@ export function createYouTubeProvider(deps: YouTubeProviderDeps): TrendProvider 
 
       const probeRegion = regions[0] ?? 'US';
       try {
-        // maxResults=1 is the cheapest form of discover()'s own call and shares
-        // its response cache; it still costs exactly 1 unit (cost is per call,
-        // not per result), which is why the cache TTL matters.
+        // maxResults=1 is the cheapest form of discover()'s own call. It does
+        // not share discover()'s cache entry — the differing maxResults makes a
+        // different URL, and the cache is keyed on the URL — and it still costs
+        // exactly 1 unit, since quota is charged per call and not per result.
+        // The cache is what makes a repeated probe within the TTL free.
         const payload = await mostPopular(key, probeRegion, 1);
         const items = readItems(payload);
         const searchLeft = searchCallsRemaining();

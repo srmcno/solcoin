@@ -482,30 +482,46 @@ export class NotificationService {
       }),
 
       this.events.on('concept.awaiting_approval', (p) => {
+        // Expected value is the *mean* of a distribution where a handful of
+        // outcomes carry almost everything. Quoting it alone would describe a
+        // typical launch with a number a typical launch never reaches, so the
+        // stored median, 10th–90th percentiles and tail share go with it.
+        const outcome = this.feeOutcomeSummary(p.conceptId);
         void this.safeNotify({
           event: 'candidate_awaiting_approval',
           severity: 'info',
           title: `${p.name} ($${p.symbol}) is waiting for your approval`,
-          body: `Concept ${p.name} ($${p.symbol}) cleared the quality gate with a modelled expected value of ${p.expectedValueSol.toFixed(4)} SOL and needs a human decision before it can launch. Expected value is a model estimate over a heavily skewed outcome distribution — read it as a ranking signal, not a forecast of this token's return.`,
+          body: `Concept ${p.name} ($${p.symbol}) cleared the quality gate and needs a human decision before it can launch. ${outcome.text}`,
           dedupeKey: `awaiting_approval:${p.conceptId}`,
           refType: 'concept',
           refId: p.conceptId,
           link: `/candidates/${p.conceptId}`,
-          data: { conceptId: p.conceptId, name: p.name, symbol: p.symbol, expectedValueSol: p.expectedValueSol },
+          data: { conceptId: p.conceptId, name: p.name, symbol: p.symbol, expectedValueSol: p.expectedValueSol, ...outcome.data },
         });
       }),
 
       this.events.on('model.retrained', (p) => {
+        // A log loss without the size of the holdout it was measured on is not
+        // a number anyone can act on, so it is looked up rather than omitted —
+        // and when the bundle did not record one, the message says so instead
+        // of letting the reader assume the figure is well measured.
+        const holdout = this.holdoutSize(p.version);
+        const holdoutClause =
+          holdout === null
+            ? ', though this bundle did not record how many held-out outcomes that was measured over, so how precisely it is measured is unknown'
+            : ` over ${holdout} held-out outcome${holdout === 1 ? '' : 's'}${
+                holdout < 30 ? `, which is too small a holdout for the gap between two nearby log losses to be meaningful` : ''
+              }`;
         void this.safeNotify({
           event: 'model_retrained',
           severity: 'info',
           title: `Success model retrained as ${p.version} on ${p.trainedOn} outcomes`,
-          body: `A new model bundle (${p.version}) was fitted on ${p.trainedOn} observed launch outcomes with a holdout log loss of ${p.logLoss.toFixed(4)} (lower is better; 0.693 is the score of an uninformative coin flip). With ${p.trainedOn} outcomes the fit is ${p.trainedOn < 50 ? 'still dominated by the priors and should be treated as provisional' : 'starting to be driven by observed data'}.`,
+          body: `A new model bundle (${p.version}) was fitted on ${p.trainedOn} observed launch outcomes. Held-out log loss is ${p.logLoss.toFixed(3)}${holdoutClause} (lower is better; 0.693 is the score of an uninformative coin flip). With ${p.trainedOn} outcomes in total the fit is ${p.trainedOn < 50 ? 'still dominated by the priors and should be treated as provisional' : 'starting to be driven by observed data'}.`,
           dedupeKey: `model_retrained:${p.version}`,
           refType: 'model',
           refId: p.version,
           link: '/learning',
-          data: { version: p.version, trainedOn: p.trainedOn, logLoss: p.logLoss },
+          data: { version: p.version, trainedOn: p.trainedOn, logLoss: p.logLoss, holdoutN: holdout },
         });
       }),
     );
@@ -838,6 +854,81 @@ export class NotificationService {
     } catch (e) {
       this.log.error({ event: input.event, err: safeErrorText(e, 300) }, 'failed to record notification');
     }
+  }
+
+  /**
+   * One honest sentence about a concept's modelled creator-fee outcome.
+   *
+   * The distribution is severely right-skewed — most launches earn close to
+   * nothing and a rare one earns most of the total — so the mean on its own
+   * would be a number almost no launch achieves. Median first, then the
+   * 10th-90th percentile range, then the share of the mean that comes from the
+   * extreme tail, and only then the mean itself. When there is no stored
+   * prediction the sentence says so; it does not invent one.
+   */
+  private feeOutcomeSummary(conceptId: string): { text: string; data: Record<string, unknown> } {
+    const row = this.db.$raw
+      .prepare(
+        `SELECT expected_value_sol, expected_creator_fees_sol, creator_fees_median_sol, creator_fees_p10_sol,
+                creator_fees_p90_sol, tail_concentration, probability_profitable, confidence
+           FROM predictions WHERE concept_id = ? ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(conceptId) as
+      | {
+          expected_value_sol: number;
+          expected_creator_fees_sol: number;
+          creator_fees_median_sol: number;
+          creator_fees_p10_sol: number;
+          creator_fees_p90_sol: number;
+          tail_concentration: number;
+          probability_profitable: number;
+          confidence: number;
+        }
+      | undefined;
+
+    if (!row) {
+      return {
+        text: 'No stored prediction was found for this concept, so its modelled outcome distribution is unavailable here — open the candidate to see the numbers the quality gate actually used.',
+        data: { outcomeDistribution: 'insufficient' },
+      };
+    }
+
+    const tailPercent = Math.round(row.tail_concentration * 100);
+    const text =
+      `Modelled creator-fee outcome: a median of ${row.creator_fees_median_sol.toFixed(4)} SOL, with an 80% range of ` +
+      `${row.creator_fees_p10_sol.toFixed(4)}-${row.creator_fees_p90_sol.toFixed(4)} SOL, and ${tailPercent}% of the mean ` +
+      `coming from the top 1% of simulated outcomes. The mean expected value is ${row.expected_value_sol.toFixed(4)} SOL; ` +
+      `because the distribution is that skewed, the median is the better guess for this one launch and the mean is only a ` +
+      `ranking signal across many. The model puts the chance of ending up profitable at ${(row.probability_profitable * 100).toFixed(0)}% ` +
+      `and rates its own confidence in this concept at ${(row.confidence * 100).toFixed(0)}%. Every figure here is a simulation ` +
+      `output, not a forecast of what this token will do.`;
+
+    return {
+      text,
+      data: {
+        expectedCreatorFeesSol: row.expected_creator_fees_sol,
+        medianCreatorFeesSol: row.creator_fees_median_sol,
+        creatorFeesP10Sol: row.creator_fees_p10_sol,
+        creatorFeesP90Sol: row.creator_fees_p90_sol,
+        tailConcentration: row.tail_concentration,
+        probabilityProfitable: row.probability_profitable,
+        modelConfidence: row.confidence,
+      },
+    };
+  }
+
+  /**
+   * Number of held-out outcomes a bundle's log loss was measured over, or null
+   * when the bundle did not record one. Never guessed: an unknown holdout is
+   * reported as unknown.
+   */
+  private holdoutSize(version: string): number | null {
+    const row = this.db.$raw.prepare('SELECT metrics FROM model_versions WHERE version = ?').get(version) as
+      | { metrics: string | null }
+      | undefined;
+    if (!row) return null;
+    const metrics = parseJson<{ holdout?: unknown }>(row.metrics, {});
+    return typeof metrics.holdout === 'number' && Number.isFinite(metrics.holdout) ? metrics.holdout : null;
   }
 
   /** "NAME ($TICKER)" for a mint, or null when the token is not known locally. */

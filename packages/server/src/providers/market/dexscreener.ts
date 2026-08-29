@@ -38,6 +38,15 @@ import type { MarketProvider, ProviderStatus, TokenMarketData } from '../types.j
  *    canonical pool's volume, not the token's. `getTokens` records which of the
  *    two it did in `dexscreener.aggregation` so no caller has to guess, and
  *    `{ allPairs: true }` forces the accurate (one-request-per-mint) path.
+ *  - `/token-pairs/v1/solana/{mint}` returns pools where the mint is the QUOTE
+ *    token as well as pools where it is the base. Verified live: USDC came back
+ *    with 13 quote-side pools out of 30, and the highest-liquidity one was
+ *    TRUMP/USDC. Every descriptive field on a pair — `baseToken`, `priceUsd`,
+ *    `marketCap`, `fdv`, `priceChange`, and the `txns` buy/sell split —
+ *    describes the BASE token, so aggregating a quote-side pool would have
+ *    reported USDC as "OFFICIAL TRUMP" at $2.66. `aggregate` therefore builds
+ *    the token view from base-side pools only and counts the rest in
+ *    `dexscreener.quoteSidePairCount`.
  *  - `priceUsd`, `priceNative` and `liquidity.base`/`.quote` come back as
  *    STRINGS, while `volume`, `txns`, `marketCap` and `fdv` are numbers.
  *  - `liquidity`, `info`, `marketCap`, `fdv` and `pairCreatedAt` are all
@@ -120,10 +129,18 @@ export interface DexScreenerExtras {
    * single canonical pool, so volume understates the token.
    */
   aggregation: 'all-pairs' | 'top-pair-only';
+  /** Base-side pools only — the ones that describe this mint. */
   pairCount: number;
-  /** The highest-liquidity pool; the one whose price is reported. */
+  /**
+   * Pools that hold this mint as the QUOTE token. They are excluded from every
+   * aggregate because their price, market cap, price change and buy/sell split
+   * all describe the base token, not this one. Counted here so the omission is
+   * visible rather than silent.
+   */
+  quoteSidePairCount?: number;
+  /** The highest-liquidity base-side pool; the one whose price is reported. */
   canonicalPair: DexScreenerPair;
-  /** Every pool considered, highest liquidity first. */
+  /** Every base-side pool considered, highest liquidity first. */
   pairs: DexScreenerPair[];
   /** Distinct DEXes the token trades on — a real depth-of-market signal. */
   dexIds: string[];
@@ -481,7 +498,7 @@ export function createDexScreenerProvider(deps: DexScreenerProviderOptions = {})
       if (!mint || !MINT_RE.test(mint)) continue;
       out.push({
         mint,
-        ...optional('url', asString(raw['url'])),
+        ...optional('url', sanitiseOptional(asString(raw['url']), 300)),
         // Deployer-written marketing copy that reaches a model: untrusted.
         ...optional('description', sanitiseOptional(asString(raw['description']), 600)),
         links: readLinks(raw['links']),
@@ -507,6 +524,12 @@ export function createDexScreenerProvider(deps: DexScreenerProviderOptions = {})
  * a token's real activity is the sum of what happened everywhere it trades and
  * taking only the canonical pool would understate a token that migrated venues
  * mid-window.
+ *
+ * Only pools where `mint` is the BASE token are considered. DexScreener
+ * describes every pair from the base token's point of view, so a pool that
+ * holds this mint as the quote asset carries the other token's price, market
+ * cap, price change and buy/sell direction; folding one in produces a record
+ * that is confidently about the wrong token.
  */
 function aggregate(
   mint: string,
@@ -514,8 +537,13 @@ function aggregate(
   aggregation: 'all-pairs' | 'top-pair-only',
   ctx: { observedAt: number; solUsd: number | null },
 ): DexScreenerTokenMarketData | null {
-  const sorted = sortByLiquidity(pairs);
+  const all = sortByLiquidity(pairs);
+  const sorted = all.filter((p) => p.baseMint === mint);
+  const quoteSidePairCount = all.length - sorted.length;
   const canonical = sorted[0];
+  // Every pool DexScreener knows holds this mint as the quote asset, so it has
+  // no market view of the token itself. Null means "no data", which is the
+  // honest answer; a quote-side pool would answer about a different token.
   if (!canonical) return null;
 
   const sumVolume = (w: DexScreenerWindow): number | undefined => {
@@ -571,6 +599,7 @@ function aggregate(
   const extras: DexScreenerExtras = {
     aggregation,
     pairCount: sorted.length,
+    ...optional('quoteSidePairCount', quoteSidePairCount > 0 ? quoteSidePairCount : undefined),
     canonicalPair: canonical,
     pairs: sorted,
     dexIds,
@@ -655,9 +684,12 @@ function readPair(raw: unknown): DexScreenerPair | null {
   // chains' pairs, and an EVM pair here would poison every aggregate below.
   if (asString(raw['chainId']) !== SOLANA_CHAIN_ID) return null;
 
-  const pairAddress = asString(raw['pairAddress']);
+  // Addresses are structural: they key market records and are pasted into
+  // explorer links, so they are shape-checked rather than sanitised. Anything
+  // that is not a base58 pubkey is not an address and the pair is unusable.
+  const pairAddress = asAddress(raw['pairAddress']);
   const baseToken = isRecord(raw['baseToken']) ? raw['baseToken'] : null;
-  const baseMint = baseToken ? asString(baseToken['address']) : null;
+  const baseMint = baseToken ? asAddress(baseToken['address']) : null;
   if (!pairAddress || !baseMint) return null;
 
   const quoteToken = isRecord(raw['quoteToken']) ? raw['quoteToken'] : null;
@@ -666,14 +698,14 @@ function readPair(raw: unknown): DexScreenerPair | null {
 
   return {
     pairAddress,
-    dexId: asString(raw['dexId']) ?? '',
-    ...optional('url', asString(raw['url'])),
+    dexId: sanitiseOptional(asString(raw['dexId']), 32) ?? '',
+    ...optional('url', sanitiseOptional(asString(raw['url']), 300)),
     baseMint,
     // Token names and symbols are attacker-controlled — anyone can mint a token
     // whose name is a prompt-injection payload — and they reach a model.
     ...optional('baseName', sanitiseOptional(asString(baseToken?.['name']), 120)),
     ...optional('baseSymbol', sanitiseOptional(asString(baseToken?.['symbol']), 32)),
-    ...optional('quoteMint', quoteToken ? asString(quoteToken['address']) : undefined),
+    ...optional('quoteMint', quoteToken ? asAddress(quoteToken['address']) : undefined),
     ...optional('quoteSymbol', sanitiseOptional(quoteToken ? asString(quoteToken['symbol']) : null, 32)),
     // priceUsd / priceNative arrive as strings ("0.005923").
     ...optional('priceUsd', finiteNumber(raw['priceUsd'])),
@@ -691,7 +723,7 @@ function readPair(raw: unknown): DexScreenerPair | null {
     txns: readTxns(raw['txns']),
     ...optional('websites', readUrlList(info?.['websites'])),
     ...optional('socials', readSocials(info?.['socials'])),
-    ...optional('imageUrl', asString(info?.['imageUrl'])),
+    ...optional('imageUrl', sanitiseOptional(asString(info?.['imageUrl']), 300)),
   };
 }
 
@@ -781,6 +813,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * A base58 Solana pubkey, or null. Used for every address-shaped field so a
+ * malformed or injected value is rejected outright instead of being sanitised
+ * into a plausible-looking but meaningless address.
+ */
+function asAddress(value: unknown): string | null {
+  const s = asString(value);
+  return s !== null && MINT_RE.test(s) ? s : null;
 }
 
 /** DexScreener mixes numeric strings and numbers in the same payload. */

@@ -75,6 +75,21 @@ const METRIC_SHRINK_STRENGTH = 5;
  */
 const MIN_N_FOR_TAIL_STATS = 10;
 
+/**
+ * Difference in outcome coverage (recorded outcomes / assignments) between the
+ * best- and worst-covered arm above which differential attrition is called out.
+ *
+ * Assignment is randomised, but an outcome only exists for a concept the
+ * pipeline went on to launch, and that decision happens *after* assignment. If
+ * one arm loses a materially larger share of its subjects before the outcome is
+ * recorded, the arms that remain are no longer comparable groups and the
+ * difference between them is partly selection rather than effect.
+ */
+const ATTRITION_COVERAGE_GAP = 0.2;
+
+/** Below this many assignments per arm, coverage is too noisy to read as attrition. */
+const MIN_ASSIGNED_FOR_ATTRITION_CHECK = 5;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -158,27 +173,47 @@ export interface ArmResult {
   config: Record<string, unknown>;
   /** Subjects assigned, including those whose outcome window has not closed. */
   assigned: number;
-  /** Assignments with a recorded outcome. All statistics below use this n. */
+  /** Assignments with a recorded outcome. The success rate uses this n. */
   n: number;
+  /**
+   * Fraction of this arm's assignments that reached a recorded outcome, or null
+   * when nothing was assigned. Coverage that differs between arms is the
+   * warning sign for differential attrition: see `ExperimentResults.caveats`.
+   */
+  outcomeCoverage: number | null;
   successRate: ArmRate;
   /**
    * Metric distribution. Mean is reported next to the median and percentiles
    * because a memecoin metric is heavy-tailed enough that the mean routinely
    * describes none of the launches in the arm.
+   *
+   * Every field is null when `valueCount` is 0. An arm with no metric values
+   * has no mean, and reporting 0 would be a fabricated number sitting in the
+   * same column as measured ones.
    */
   metric: {
-    meanValue: number;
+    /**
+     * Outcomes that carried a numeric metric value. This is the n behind every
+     * figure in this block, and it can be smaller than `n` above: an outcome
+     * can be recorded as a success or failure with a null value.
+     */
+    valueCount: number;
+    meanValue: number | null;
     /** Mean pulled toward the pooled mean of the experiment by sample size. */
-    shrunkMeanValue: number;
-    medianValue: number;
-    p25: number;
-    p75: number;
-    p90: number;
-    maxValue: number;
+    shrunkMeanValue: number | null;
+    medianValue: number | null;
+    p25: number | null;
+    p75: number | null;
+    p90: number | null;
+    maxValue: number | null;
     /** Share of the arm's total metric contributed by its top 10% of launches. */
-    topTenPercentShare: number;
+    topTenPercentShare: number | null;
     /** mean/median. Above ~2 the mean is a statement about the tail. */
     meanToMedianRatio: number | null;
+    /**
+     * False below `MIN_N_FOR_TAIL_STATS` values, where p90, the max and the
+     * top-decile share describe individual launches rather than a tail.
+     */
     tailStatisticsMeaningful: boolean;
   };
   /**
@@ -202,6 +237,14 @@ export interface ExperimentResults {
   minSamplesPerArm: number;
   totalAssigned: number;
   totalOutcomes: number;
+  /** Outcomes that carried a numeric metric value; the n behind `pooledMeanValue`. */
+  totalMetricValues: number;
+  /**
+   * Mean metric across every arm, and the target the per-arm means are shrunk
+   * toward. Null when no outcome carried a value, in which case no arm has a
+   * shrunk mean either.
+   */
+  pooledMeanValue: number | null;
   arms: ArmResult[];
   /** The arm with the highest probability of being best, if any outcome exists. */
   leader: { key: string; probabilityBest: number } | null;
@@ -209,6 +252,15 @@ export interface ExperimentResults {
   conclusive: boolean;
   /** Plain English, written to refuse over-claiming on small samples. */
   interpretation: string;
+  /**
+   * The limits of this comparison, in plain English: what randomisation does
+   * and does not buy, where selection can still enter, and which figures on
+   * this page are too thin to lean on. Written out rather than left implicit
+   * because the page is read by someone deciding whether to change the
+   * pipeline, and an unqualified table invites a causal reading it has not
+   * earned.
+   */
+  caveats: string[];
   monteCarloDraws: number;
 }
 
@@ -438,13 +490,20 @@ export class ExperimentService {
       parameters: {
         conclusive: results.conclusive,
         interpretation: results.interpretation,
+        // The caveats are stored with the conclusion, not just shown next to it:
+        // an audit of this decision needs to see what the evidence could not
+        // support at the moment it was drawn.
+        caveats: results.caveats,
         arms: results.arms.map((a) => ({
           key: a.key,
+          assigned: a.assigned,
           n: a.n,
           successes: a.successRate.successes,
           posteriorMean: a.successRate.posteriorMean,
           probabilityBest: a.probabilityBest,
+          metricValueCount: a.metric.valueCount,
           medianValue: a.metric.medianValue,
+          shrunkMeanValue: a.metric.shrunkMeanValue,
         })),
       },
     });
@@ -692,7 +751,9 @@ export class ExperimentService {
     const pooledValues = outcomeRows
       .filter((r) => r.outcome_at !== null && r.outcome_value !== null && Number.isFinite(r.outcome_value))
       .map((r) => r.outcome_value as number);
-    const pooledMean = pooledValues.length > 0 ? mean(pooledValues) : 0;
+    // Null, not 0, when nothing has been measured: a shrinkage target that does
+    // not exist must not masquerade as a pooled mean of zero.
+    const pooledMean = pooledValues.length > 0 ? mean(pooledValues) : null;
 
     const probabilityBest = this.probabilityBestByArm(experimentId, armRows, perArm);
 
@@ -700,8 +761,9 @@ export class ExperimentService {
       const bucket = perArm.get(arm.id) ?? { assigned: 0, successes: 0, n: 0, values: [] };
       const posterior = betaPosterior(bucket.successes, bucket.n, arm.prior_alpha, arm.prior_beta);
       const values = bucket.values;
-      const armMean = values.length > 0 ? mean(values) : 0;
-      const armMedian = values.length > 0 ? median(values) : 0;
+      const valueCount = values.length;
+      const armMean = valueCount > 0 ? mean(values) : null;
+      const armMedian = valueCount > 0 ? median(values) : null;
       return {
         armId: arm.id,
         key: arm.key,
@@ -709,6 +771,7 @@ export class ExperimentService {
         config: parseJson<Record<string, unknown>>(arm.config, {}),
         assigned: bucket.assigned,
         n: bucket.n,
+        outcomeCoverage: bucket.assigned > 0 ? bucket.n / bucket.assigned : null,
         successRate: {
           posteriorMean: posterior.mean,
           lower: posterior.lower,
@@ -717,16 +780,22 @@ export class ExperimentService {
           n: bucket.n,
         },
         metric: {
+          valueCount,
           meanValue: armMean,
-          shrunkMeanValue: shrinkToPrior(armMean, values.length, pooledMean, METRIC_SHRINK_STRENGTH),
+          shrunkMeanValue:
+            armMean !== null && pooledMean !== null
+              ? shrinkToPrior(armMean, valueCount, pooledMean, METRIC_SHRINK_STRENGTH)
+              : null,
           medianValue: armMedian,
-          p25: values.length > 0 ? quantile(values, 0.25) : 0,
-          p75: values.length > 0 ? quantile(values, 0.75) : 0,
-          p90: values.length > 0 ? quantile(values, 0.9) : 0,
-          maxValue: values.length > 0 ? Math.max(...values) : 0,
-          topTenPercentShare: values.length > 0 ? topShare(values, 0.1) : 0,
-          meanToMedianRatio: armMedian > 0 ? armMean / armMedian : null,
-          tailStatisticsMeaningful: values.length >= MIN_N_FOR_TAIL_STATS,
+          p25: valueCount > 0 ? quantile(values, 0.25) : null,
+          p75: valueCount > 0 ? quantile(values, 0.75) : null,
+          p90: valueCount > 0 ? quantile(values, 0.9) : null,
+          // reduce rather than Math.max(...values): the spread form throws on a
+          // long-running experiment once the argument list outgrows the stack.
+          maxValue: valueCount > 0 ? values.reduce((hi, v) => (v > hi ? v : hi), values[0]!) : null,
+          topTenPercentShare: valueCount > 0 ? topShare(values, 0.1) : null,
+          meanToMedianRatio: armMean !== null && armMedian !== null && armMedian > 0 ? armMean / armMedian : null,
+          tailStatisticsMeaningful: valueCount >= MIN_N_FOR_TAIL_STATS,
         },
         probabilityBest: probabilityBest.get(arm.id) ?? 0,
         reachedMinSamples: bucket.n >= experiment.min_samples_per_arm,
@@ -748,10 +817,13 @@ export class ExperimentService {
       minSamplesPerArm: experiment.min_samples_per_arm,
       totalAssigned,
       totalOutcomes,
+      totalMetricValues: pooledValues.length,
+      pooledMeanValue: pooledMean,
       arms,
       leader: leaderArm ? { key: leaderArm.key, probabilityBest: leaderArm.probabilityBest } : null,
       conclusive,
       interpretation: this.interpret(experiment, arms, leaderArm, conclusive, totalOutcomes),
+      caveats: this.caveats(experiment, arms, totalOutcomes),
       monteCarloDraws: PROBABILITY_BEST_DRAWS,
     };
   }
@@ -846,18 +918,90 @@ export class ExperimentService {
     }
 
     if (conclusive && leader) {
-      const medianNote =
-        leader.metric.tailStatisticsMeaningful && leader.metric.meanToMedianRatio !== null && leader.metric.meanToMedianRatio > 2
-          ? ` Note that ${leader.key}'s mean ${experiment.metric} (${leader.metric.meanValue.toFixed(4)}) is ${leader.metric.meanToMedianRatio.toFixed(1)}x its median (${leader.metric.medianValue.toFixed(4)}), so the size of the win rests on the tail rather than on a typical launch.`
-          : ` Its median ${experiment.metric} is ${leader.metric.medianValue.toFixed(4)} against a mean of ${leader.metric.meanValue.toFixed(4)}.`;
+      const { meanValue, medianValue, meanToMedianRatio, valueCount, tailStatisticsMeaningful } = leader.metric;
+      let medianNote: string;
+      if (meanValue === null || medianValue === null) {
+        // The success comparison is conclusive but no outcome carried a metric
+        // value, so the *size* of the win is simply unknown. Say so.
+        medianNote = ` No ${experiment.metric} value was recorded for any of ${leader.key}'s outcomes, so the size of the effect is unknown even though its direction is not.`;
+      } else if (tailStatisticsMeaningful && meanToMedianRatio !== null && meanToMedianRatio > 2) {
+        medianNote = ` Note that ${leader.key}'s mean ${experiment.metric} (${meanValue.toFixed(4)}) is ${meanToMedianRatio.toFixed(1)}x its median (${medianValue.toFixed(4)}) over ${valueCount} valued outcomes, so the size of the win rests on the tail rather than on a typical launch.`;
+      } else {
+        medianNote = ` Its median ${experiment.metric} is ${medianValue.toFixed(4)} against a mean of ${meanValue.toFixed(4)}, over ${valueCount} valued outcome${valueCount === 1 ? '' : 's'}.`;
+      }
       return (
         `${leader.key} is the best arm with probability ${(leader.probabilityBest * 100).toFixed(0)}%, on ${perArmCounts} launches, ` +
         `with a posterior success rate of ${(leader.successRate.posteriorMean * 100).toFixed(0)}% (95% CI ${(leader.successRate.lower * 100).toFixed(0)}-${(leader.successRate.upper * 100).toFixed(0)}%).` +
-        medianNote
+        medianNote +
+        ' This is a difference between randomised arms, not between the launches the pipeline chose to make: see the caveats for what still stands between it and a causal claim.'
       );
     }
 
     return `Every arm has reached its sample size (${perArmCounts}) but no arm leads; the factor ${experiment.factor} appears not to matter for ${experiment.metric}.`;
+  }
+
+  /**
+   * The standing limits of the comparison, listed next to it.
+   *
+   * Randomised assignment buys a causal claim about the factor, but only over
+   * the subjects that survive to a recorded outcome, and only to the precision
+   * the sample supports. Both of those qualifications are invisible in a table
+   * of per-arm rates, so they are written out here and returned with every
+   * result rather than kept in a doc comment nobody reads at decision time.
+   */
+  private caveats(experiment: ExperimentRow, arms: ArmResult[], totalOutcomes: number): string[] {
+    const out: string[] = [];
+
+    out.push(
+      `Arms are allocated by a hash of the subject id, independently of anything the pipeline scored, so a difference between arms is evidence about ${experiment.factor} itself and not merely a correlation with it. That guarantee covers assignment only.`,
+    );
+    out.push(
+      `An outcome exists only for a concept that was launched and then measured, and the launch decision is made after assignment. This comparison is therefore conditioned on a post-assignment event: if ${experiment.factor} also changes how likely a concept is to be launched or to be observed, part of any measured difference is selection rather than effect.`,
+    );
+
+    if (totalOutcomes === 0) {
+      out.push(
+        'No outcome has been recorded yet. The per-arm probabilities below come entirely from the arms\' priors and describe the priors, not the world.',
+      );
+      return out;
+    }
+
+    // Differential attrition: randomisation is undone if the arms lose
+    // materially different shares of their subjects before the outcome.
+    const measurable = arms.filter((a) => a.assigned >= MIN_ASSIGNED_FOR_ATTRITION_CHECK && a.outcomeCoverage !== null);
+    if (measurable.length >= 2) {
+      const best = measurable.reduce((hi, a) => (a.outcomeCoverage! > hi.outcomeCoverage! ? a : hi), measurable[0]!);
+      const worst = measurable.reduce((lo, a) => (a.outcomeCoverage! < lo.outcomeCoverage! ? a : lo), measurable[0]!);
+      const gap = best.outcomeCoverage! - worst.outcomeCoverage!;
+      if (gap > ATTRITION_COVERAGE_GAP) {
+        out.push(
+          `Outcome coverage differs sharply between arms: ${best.key} has outcomes for ${best.n}/${best.assigned} assignments (${(best.outcomeCoverage! * 100).toFixed(0)}%) against ${worst.key}'s ${worst.n}/${worst.assigned} (${(worst.outcomeCoverage! * 100).toFixed(0)}%). Differential attrition of this size means the arms being compared are no longer the groups that were randomised, and the difference between them should be read as partly selection until the gap is explained.`,
+        );
+      }
+    }
+
+    const thinTails = arms.filter((a) => a.metric.valueCount > 0 && !a.metric.tailStatisticsMeaningful);
+    if (thinTails.length > 0) {
+      out.push(
+        `Tail statistics (p90, max, top-decile share) are marked unreliable for ${thinTails.map((a) => `${a.key} (${a.metric.valueCount} valued outcome${a.metric.valueCount === 1 ? '' : 's'})`).join(', ')}: below ${MIN_N_FOR_TAIL_STATS} values they describe individual launches, not a distribution.`,
+      );
+    }
+
+    const noValues = arms.filter((a) => a.n > 0 && a.metric.valueCount === 0);
+    if (noValues.length > 0) {
+      out.push(
+        `${noValues.map((a) => a.key).join(', ')} recorded outcomes with no ${experiment.metric} value attached, so ${noValues.length === 1 ? 'its' : 'their'} metric columns are null rather than zero. A null there means unmeasured, not "earned nothing".`,
+      );
+    }
+
+    out.push(
+      `Per-arm means are reported both raw and shrunk toward the pooled mean of the experiment (as though each arm carried ${METRIC_SHRINK_STRENGTH} extra launches at the pooled average). Compare arms on the shrunk figure: ${experiment.metric} is heavy-tailed enough that one outsized launch will otherwise decide which arm looks best.`,
+    );
+    out.push(
+      `The arm comparison and P(best) are computed on the binary success outcome, not on mean ${experiment.metric}. A mean comparison across this few heavy-tailed launches would mostly report which arm happened to catch the single biggest winner.`,
+    );
+
+    return out;
   }
 
   // -------------------------------------------------------------------------

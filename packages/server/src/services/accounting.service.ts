@@ -129,12 +129,21 @@ export interface LedgerEntry {
 
 export interface CategoryTotal {
   category: string;
+  /**
+   * Bucketing is by category *and* direction. `wallet_transfer` carries both:
+   * a sweep out and a top-up in are the same category, and summing them into
+   * one signed total would report the gross traffic as though it were a
+   * position.
+   */
   type: LedgerEntryType;
   entryCount: number;
   amountSol: number;
   /** Sum over entries that carry a USD valuation only. */
   amountUsd: number;
+  /** Entries in this bucket with no recorded price. `amountUsd` omits them. */
   entriesMissingUsd: number;
+  /** Null when no entry in the bucket carried a USD valuation. */
+  usdCoverage: number | null;
   countsTowardPnl: boolean;
 }
 
@@ -148,10 +157,19 @@ export interface AccountingSummary {
   costSol: number;
   netSol: number;
 
-  /** USD totals over the subset of entries that carry a recorded valuation. */
-  revenueUsd: number;
-  costUsd: number;
-  netUsd: number;
+  /**
+   * USD totals over the subset of entries that carry a recorded valuation, or
+   * null where that subset is empty. Null means unvalued; 0 would read as
+   * "no money", which is a different and usually false statement.
+   */
+  revenueUsd: number | null;
+  costUsd: number | null;
+  /**
+   * Null unless *both* sides carried a valuation. Netting a valued revenue
+   * total against an unvalued cost total would manufacture a profit out of
+   * missing prices.
+   */
+  netUsd: number | null;
 
   /**
    * Coverage of the USD figures. `entriesMissingUsd` of `entryCount` entries
@@ -160,11 +178,27 @@ export interface AccountingSummary {
    */
   entriesMissingUsd: number;
   usdCoverage: number;
+  /**
+   * Coverage of each side separately. A net USD figure is only as good as the
+   * worse of the two, and the two routinely differ: launch spend carries no
+   * price at all while AI costs are billed in dollars.
+   */
+  revenueEntryCount: number;
+  revenueEntriesMissingUsd: number;
+  costEntryCount: number;
+  costEntriesMissingUsd: number;
   /** Entries whose SOL amount is zero because only a USD cost was recorded. */
   entriesMissingSol: number;
 
-  /** Internal transfers, reported separately because they are not P&L. */
+  /**
+   * Internal transfers, reported separately because they are not P&L. In and
+   * out are kept apart: one 3 SOL sweep out and one 3 SOL top-up in is 6 SOL of
+   * movement and 0 SOL of position, and a single total cannot say both.
+   */
   transferCount: number;
+  transferInSol: number;
+  transferOutSol: number;
+  /** Gross movement, `transferInSol + transferOutSol`. Not a balance. */
   transferSol: number;
 
   /** Facts a reader needs in order not to misread the totals above. */
@@ -178,10 +212,15 @@ export interface MonthlyBreakdownRow {
   revenueSol: number;
   costSol: number;
   netSol: number;
-  /** Null when no entry in the month carried a recorded USD valuation. */
+  /** Null when no *revenue* entry in the month carried a recorded USD valuation. */
   revenueUsd: number | null;
+  /** Null when no *cost* entry in the month carried a recorded USD valuation. */
   costUsd: number | null;
+  /** Null unless both sides of the month are valued; see `AccountingSummary.netUsd`. */
   netUsd: number | null;
+  /** P&L entries in the month, and how many of them had no recorded price. */
+  entryCount: number;
+  entriesMissingUsd: number;
   launches: number;
 }
 

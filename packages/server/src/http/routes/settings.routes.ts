@@ -71,7 +71,7 @@ export default async function settingsRoutes(
           description:
             'Discovers trends, generates and evaluates concepts, and runs paper launches. Nothing is broadcast and no funds are at risk.',
           networks: ['simulation'],
-          maxAutonomy: 'suggest',
+          maxAutonomy: 'approve',
         },
         {
           id: 'phase2_devnet',
