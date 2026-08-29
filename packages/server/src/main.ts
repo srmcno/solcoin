@@ -81,7 +81,12 @@ async function main(): Promise<void> {
   );
 
   let shuttingDown = false;
-  const shutdown = async (signal: string): Promise<void> => {
+  /**
+   * `code` is what the supervisor reads. A signal is a clean stop; a crash is
+   * not, and reporting one as the other is how a systemd unit with
+   * `Restart=on-failure` quietly stays down after a fatal error.
+   */
+  const shutdown = async (signal: string, code = 0): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     boot.info({ signal }, 'shutting down');
@@ -97,7 +102,7 @@ async function main(): Promise<void> {
       await container.shutdown();
       closeDatabase(container.db);
       boot.info('shutdown complete');
-      process.exit(0);
+      process.exit(code);
     } catch (e) {
       boot.error({ err: safeErrorText(e, 300) }, 'error during shutdown');
       process.exit(1);
@@ -112,7 +117,7 @@ async function main(): Promise<void> {
   });
   process.on('uncaughtException', (error) => {
     log.fatal({ err: safeErrorText(error, 500) }, 'uncaught exception; shutting down');
-    void shutdown('uncaughtException');
+    void shutdown('uncaughtException', 1);
   });
 }
 

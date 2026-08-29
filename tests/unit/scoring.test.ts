@@ -19,6 +19,7 @@ import {
   CURVE_VAULT_RENT_LAMPORTS,
   type CompetitorToken,
 } from '@solcoin/shared';
+import { explainPrediction } from '../../packages/server/src/services/prediction.service.js';
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 5, 15, 12, 0, 0);
@@ -441,5 +442,67 @@ describe('unmeasured growth is penalised, not treated as average', () => {
       phase: 'nascent',
     });
     expect(unmeasured.score).toBeLessThan(52);
+  });
+});
+
+describe('explainPrediction', () => {
+  function row(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      p_first_buy: 0.42,
+      p_ten_holders: 0.16,
+      p_graduation: 0.012,
+      expected_creator_fees_sol: 0.0184,
+      creator_fees_p10_sol: 0,
+      creator_fees_p90_sol: 0.0512,
+      creator_fees_median_sol: 0.0009,
+      expected_value_sol: -0.0021,
+      probability_profitable: 0.31,
+      tail_concentration: 0.62,
+      confidence: 0.28,
+      model_version: 'v1-priors',
+      drivers: JSON.stringify([
+        { feature: 'trend_velocity', contribution: 0.44 },
+        { feature: 'originality', contribution: 0.21 },
+        { feature: 'saturation', contribution: -0.33 },
+      ]),
+      ...over,
+    };
+  }
+
+  it('states every probability the model produced, graduation included', () => {
+    const lines = explainPrediction(row());
+    expect(lines[0]).toContain('42% chance of any organic buyer');
+    expect(lines[0]).toContain('16% of reaching ten holders');
+    // A rate near one percent is meaningless at zero decimal places.
+    expect(lines[0]).toContain('1.2% of graduating');
+  });
+
+  it('signs a negative expected value rather than hiding it', () => {
+    const lines = explainPrediction(row()).join('\n');
+    expect(lines).toContain('-0.0021 SOL after costs');
+    expect(lines).not.toContain('+-');
+  });
+
+  it('warns when the expected value is a tail artefact', () => {
+    expect(explainPrediction(row()).join('\n')).toContain('62% of the expected value comes from the top 1%');
+    expect(explainPrediction(row({ tail_concentration: 0.2 })).join('\n')).not.toContain('top 1%');
+  });
+
+  it('names the strongest drivers in plain language', () => {
+    const lines = explainPrediction(row()).join('\n');
+    expect(lines).toContain('Strongest positive signals: trend growth rate, concept originality.');
+    expect(lines).toContain('Strongest negative signals: on-chain saturation.');
+  });
+
+  it('says low confidence is a prior rather than a measurement', () => {
+    expect(explainPrediction(row()).join('\n')).toContain('informed priors');
+    expect(explainPrediction(row({ confidence: 0.8 })).join('\n')).toContain('confidence 80% (version v1-priors)');
+  });
+
+  it('survives a row whose numbers and drivers are unusable', () => {
+    const lines = explainPrediction({ p_first_buy: 'not a number', drivers: '{"broken":' });
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.join('\n')).not.toContain('NaN');
+    expect(lines.join('\n')).not.toContain('Strongest');
   });
 });

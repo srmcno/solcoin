@@ -49,3 +49,30 @@ jobs:
         run: npm run db:migrate
         env:
           DATABASE_PATH: ./data/ci-check.db
+
+      # The unit tests import modules; they do not run the artefact that ships.
+      # A bundled server can typecheck, build and test perfectly and still die
+      # on boot — that is exactly how the pino worker-transport bug behaved, so
+      # this starts the real bundle and waits for it to serve a request.
+      - name: Boot the built server
+        run: |
+          set -euo pipefail
+          node packages/server/dist/main.js &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4317/api/health > /dev/null; then
+              echo "server answered after ${i}s"
+              exit 0
+            fi
+            if ! kill -0 "$server" 2>/dev/null; then
+              echo "server exited before serving a request" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "server never answered /api/health" >&2
+          exit 1
+        env:
+          DATABASE_PATH: ./data/ci-check.db
+          SOLCOIN_MASTER_KEY: ci-only-not-a-real-key-0123456789

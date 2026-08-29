@@ -5,7 +5,7 @@ import { AppError } from '../../core/errors.js';
 import { parseJson } from '../../core/json.js';
 import { AUDIT_ACTIONS } from '../../security/audit.js';
 import { actorFrom, requirePermission } from '../server.js';
-import { humaniseFeature } from '../../services/prediction.service.js';
+import { explainPrediction } from '../../services/prediction.service.js';
 import type { AppContainer } from '../../container.js';
 
 /**
@@ -80,7 +80,7 @@ export default async function candidateRoutes(
             economics: parseJson(prediction.economics as string | null, {}),
           }
         : null,
-      explanation: prediction ? buildExplanation(prediction) : [],
+      explanation: prediction ? explainPrediction(prediction) : [],
       evaluations: evaluations.map((e) => ({
         ...e,
         concerns: parseJson(e.concerns as string | null, []),
@@ -276,55 +276,4 @@ function countsByStatus(container: AppContainer): Record<string, number> {
     n: number;
   }>;
   return Object.fromEntries(rows.map((r) => [r.status, r.n]));
-}
-
-/**
- * Turn a stored prediction row into the sentences a person actually asks for:
- * what made this look good, how large the payoff might be, and how much of that
- * is measurement rather than prior.
- */
-function buildExplanation(prediction: Record<string, unknown>): string[] {
-  const lines: string[] = [];
-  const p = (key: string): number => {
-    const n = Number(prediction[key]);
-    return Number.isFinite(n) ? n : 0;
-  };
-  lines.push(
-    `Modelled ${(p('p_first_buy') * 100).toFixed(0)}% chance of any organic buyer, ${(p('p_ten_holders') * 100).toFixed(0)}% of reaching ten holders, and ${(p('p_graduation') * 100).toFixed(1)}% of graduating.`,
-  );
-  lines.push(
-    `Expected creator fees ${p('expected_creator_fees_sol').toFixed(4)} SOL, with a 10th-to-90th percentile range of ${p('creator_fees_p10_sol').toFixed(4)} to ${p('creator_fees_p90_sol').toFixed(4)} SOL. The median outcome is ${p('creator_fees_median_sol').toFixed(4)} SOL.`,
-  );
-  lines.push(
-    `Net expected value ${p('expected_value_sol') >= 0 ? '+' : ''}${p('expected_value_sol').toFixed(4)} SOL after costs; ${(p('probability_profitable') * 100).toFixed(0)}% chance of being profitable at all.`,
-  );
-  if (p('tail_concentration') > 0.4) {
-    lines.push(
-      `${(p('tail_concentration') * 100).toFixed(0)}% of the expected value comes from the top 1% of simulated outcomes, so this is a low-probability, high-payoff candidate rather than a reliable earner.`,
-    );
-  }
-  // The decomposition is of the ten-holders head; naming the top few features
-  // is more use to an operator than the coefficient table behind them.
-  const drivers = parseJson<Array<{ feature?: unknown; contribution?: unknown }>>(
-    prediction.drivers as string | null,
-    [],
-  ).filter((d): d is { feature: string; contribution: number } => {
-    return typeof d?.feature === 'string' && Number.isFinite(Number(d?.contribution));
-  });
-  const positive = drivers.filter((d) => d.contribution > 0).slice(0, 3);
-  const negative = drivers.filter((d) => d.contribution < 0).slice(0, 3);
-  if (positive.length) {
-    lines.push(`Strongest positive signals: ${positive.map((d) => humaniseFeature(d.feature)).join(', ')}.`);
-  }
-  if (negative.length) {
-    lines.push(`Strongest negative signals: ${negative.map((d) => humaniseFeature(d.feature)).join(', ')}.`);
-  }
-
-  const confidence = p('confidence');
-  lines.push(
-    confidence < 0.5
-      ? `Model confidence is ${(confidence * 100).toFixed(0)}%, which is low: the model has seen too few real outcomes for these numbers to be measurements rather than informed priors.`
-      : `Model confidence ${(confidence * 100).toFixed(0)}% (version ${String(prediction.model_version)}).`,
-  );
-  return lines;
 }

@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { pino, type Logger as PinoLogger } from 'pino';
 import { redactSecrets } from './errors.js';
 
@@ -60,29 +61,60 @@ export type Logger = PinoLogger & {
 
 let rootLogger: Logger | null = null;
 
+/**
+ * Human-readable logs, without a worker thread.
+ *
+ * pino's `transport` option runs pino-pretty in a worker whose entry point it
+ * resolves relative to the file pino itself is running from. The server ships
+ * as a single bundled file, so that path does not exist: the worker fails to
+ * start, the failure surfaces as an uncaught exception, and the process dies
+ * before it has written one line — a silent boot failure in the default
+ * development configuration. Using pino-pretty as an ordinary stream produces
+ * the same output in-process with no path resolution to get wrong.
+ *
+ * It is also a development dependency, so a production install pruned with
+ * `--omit=dev` will not have it. Asking for pretty logs there degrades to
+ * NDJSON rather than refusing to start.
+ */
+function prettyDestination(): NodeJS.WritableStream | null {
+  try {
+    const require = createRequire(import.meta.url);
+    const loaded: unknown = require('pino-pretty');
+    const factory =
+      typeof loaded === 'function'
+        ? (loaded as (opts: Record<string, unknown>) => NodeJS.WritableStream)
+        : typeof (loaded as { default?: unknown })?.default === 'function'
+          ? ((loaded as { default: (opts: Record<string, unknown>) => NodeJS.WritableStream }).default)
+          : null;
+    if (!factory) return null;
+    return factory({ colorize: true, translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' });
+  } catch {
+    return null;
+  }
+}
+
 export function createLogger(options: LoggerOptions): Logger {
-  const base = pino({
+  const pinoOptions = {
     level: options.level,
     redact: { paths: REDACT_PATHS, censor: '[redacted]' },
     formatters: {
-      level: (label) => ({ level: label }),
+      level: (label: string) => ({ level: label }),
     },
     hooks: {
-      logMethod(args, method) {
+      logMethod(this: unknown, args: unknown[], method: (...a: unknown[]) => void) {
         // Sweep rendered strings for credential-shaped substrings.
         const cleaned = args.map((a) => (typeof a === 'string' ? redactSecrets(a) : a));
         return method.apply(this, cleaned as Parameters<typeof method>);
       },
     },
-    ...(options.pretty
-      ? {
-          transport: {
-            target: 'pino-pretty',
-            options: { colorize: true, translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' },
-          },
-        }
-      : {}),
-  }) as Logger;
+  };
+
+  const destination = options.pretty ? prettyDestination() : null;
+  const base = (destination ? pino(pinoOptions, destination) : pino(pinoOptions)) as Logger;
+
+  if (options.pretty && !destination) {
+    base.warn('pretty logging was requested but pino-pretty could not be loaded; writing NDJSON instead');
+  }
 
   rootLogger = base;
   return base;
