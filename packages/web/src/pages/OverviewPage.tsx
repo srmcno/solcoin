@@ -916,16 +916,22 @@ function buildAttention(overview: Overview | undefined, status: SystemStatus | u
   }
 
   for (const component of status?.health?.components ?? []) {
-    if (component.state === 'down' || component.state === 'degraded') {
-      items.push({
-        id: `health-${component.id}`,
-        tone: component.state === 'down' ? 'negative' : 'warning',
-        title: `${component.label ?? humanise(component.id)} is ${component.state}`,
-        detail: component.detail ?? 'No further detail was reported.',
-        to: '/health',
-        cta: 'System health',
-      });
-    }
+    if (component.state !== 'down' && component.state !== 'degraded') continue;
+    // Only an essential component blocks. The platform is built to degrade
+    // around any single optional provider, so labelling a third-party trend
+    // source having a bad day as "Blocking" would train the operator to ignore
+    // the badge that actually matters.
+    const blocking = component.essential === true && component.state === 'down';
+    items.push({
+      id: `health-${component.id}`,
+      tone: blocking ? 'negative' : 'warning',
+      title: `${component.label ?? humanise(component.id)} is ${component.state}`,
+      detail: component.essential
+        ? (component.detail ?? 'No further detail was reported.')
+        : `${component.detail ?? 'No further detail was reported.'} This source is optional — research continues without it, with less cross-platform confirmation.`,
+      to: '/health',
+      cta: 'System health',
+    });
   }
 
   return items;

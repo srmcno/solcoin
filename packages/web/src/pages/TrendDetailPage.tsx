@@ -109,11 +109,29 @@ interface Contribution {
   contribution: number;
 }
 
+interface Kinetics {
+  /**
+   * False when the series is too short or too brief to fit a slope. The
+   * kinetics module's own contract: callers must treat velocity and
+   * acceleration as unknown rather than zero-meaning-flat.
+   */
+  rateEstimable: boolean;
+  n: number | null;
+  spanHours: number | null;
+}
+
 interface ScoreBreakdown {
   rawScore?: number;
   saturationMultiplier?: number;
+  /**
+   * The second multiplier. The final score is raw × saturation × evidence, so
+   * quoting only the saturation multiplier states arithmetic that does not
+   * reproduce the number on screen.
+   */
+  evidenceMultiplier?: number;
   contributions: Contribution[];
   rationale: string[];
+  kinetics: Kinetics | null;
 }
 
 const PHASE_TONE: Record<string, Tone> = {
@@ -213,12 +231,28 @@ function parseBreakdown(raw: unknown): ScoreBreakdown | null {
     : [];
   if (contributions.length === 0 && rationale.length === 0) return null;
   return {
-    rawScore: Number.isFinite(Number(record.rawScore)) ? Number(record.rawScore) : undefined,
-    saturationMultiplier: Number.isFinite(Number(record.saturationMultiplier))
-      ? Number(record.saturationMultiplier)
-      : undefined,
+    rawScore: finiteOrUndefined(record.rawScore),
+    saturationMultiplier: finiteOrUndefined(record.saturationMultiplier),
+    evidenceMultiplier: finiteOrUndefined(record.evidenceMultiplier),
     contributions,
     rationale,
+    kinetics: parseKinetics(record.kinetics),
+  };
+}
+
+function finiteOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Kinetics ride along inside the breakdown blob; nothing here trusts its shape. */
+function parseKinetics(raw: unknown): Kinetics | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const k = raw as Record<string, unknown>;
+  if (typeof k.rateEstimable !== 'boolean') return null;
+  return {
+    rateEstimable: k.rateEstimable,
+    n: finiteOrUndefined(k.n) ?? null,
+    spanHours: finiteOrUndefined(k.spanHours) ?? null,
   };
 }
 
@@ -315,6 +349,23 @@ export function TrendDetailPage() {
 
   const observationCount = observations.length;
   const sparse = observationCount < 8;
+  /**
+   * When the scorer could not fit a growth rate, the stored velocity,
+   * acceleration and consistency are placeholder zeros. `rateEstimable === true`
+   * is the only state in which they are measurements; a missing breakdown means
+   * we cannot tell, which is not the same as knowing they are good.
+   */
+  const rateEstimable = breakdown?.kinetics?.rateEstimable === true;
+  const rateKnown = breakdown?.kinetics != null;
+  /** The AI enrichment pass writes the summary and the memeability score together. */
+  const enriched = trend.aiSummary !== null;
+  /** Names the sample the rate was attempted on, when the API reports it. */
+  const rateSample =
+    breakdown?.kinetics?.n == null
+      ? ''
+      : `: ${formatNumber(breakdown.kinetics.n)} observation${breakdown.kinetics.n === 1 ? '' : 's'}${
+          breakdown.kinetics.spanHours == null ? '' : ` spanning ${formatDuration(breakdown.kinetics.spanHours)}`
+        }`;
 
   return (
     <div className="space-y-5">
@@ -357,6 +408,16 @@ export function TrendDetailPage() {
           treat this trend as unconfirmed until a second independent source reports it.
         </Note>
       )}
+      {rateKnown && !rateEstimable && (
+        <Note tone="warning">
+          <strong>Growth rate not measurable.</strong> The observation series is too short or spans too little time to
+          fit a slope
+          {rateSample}. Velocity, acceleration and consistency below are shown as unknown rather than as zero — this
+          trend has not
+          been observed going flat, it has not been observed for long enough to say anything at all. The score is held
+          down until it can be told apart from a genuinely static topic.
+        </Note>
+      )}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile
@@ -364,9 +425,17 @@ export function TrendDetailPage() {
           value={formatScore(trend.opportunityScore, 1)}
           tone="accent"
           hint={
-            breakdown?.saturationMultiplier !== undefined && breakdown.rawScore !== undefined
-              ? `${formatScore(breakdown.rawScore, 1)} raw × ${formatPercent(breakdown.saturationMultiplier, 0)} saturation multiplier`
-              : `Raw score ${formatScore(trend.rawOpportunityScore, 1)} before saturation`
+            // The score is raw × saturation × evidence. Quoting only one of the
+            // two multipliers gives a product that does not equal the number
+            // above it, so both are named or neither is.
+            breakdown?.rawScore !== undefined &&
+            breakdown.saturationMultiplier !== undefined &&
+            breakdown.evidenceMultiplier !== undefined
+              ? `${formatScore(breakdown.rawScore, 1)} raw × ${formatPercent(
+                  breakdown.saturationMultiplier,
+                  0,
+                )} saturation × ${formatPercent(breakdown.evidenceMultiplier, 0)} growth evidence`
+              : `Raw score ${formatScore(trend.rawOpportunityScore, 1)} before the saturation and growth-evidence multipliers`
           }
         />
         <StatTile
@@ -449,7 +518,13 @@ export function TrendDetailPage() {
                       stroke={s.colour}
                       strokeWidth={2}
                       strokeDasharray={s.dash}
-                      dot={false}
+                      // Sources report on different cadences, so almost every row
+                      // is a null for every series but one. The dots mark the
+                      // actual readings; the segments between them are drawn to
+                      // make the series followable, not because anything was
+                      // observed in the gap. Without the dots the interpolation
+                      // would be indistinguishable from measured data.
+                      dot={{ r: 1.8, strokeWidth: 0, fill: s.colour }}
                       activeDot={{ r: 4 }}
                       connectNulls
                       isAnimationActive={false}
@@ -459,7 +534,12 @@ export function TrendDetailPage() {
               </ResponsiveContainer>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-subtle">
+            <p className="mt-3 text-xs leading-relaxed text-ink-subtle">
+              Each dot is one recorded reading. Sources report on their own cadence, so the lines between dots are drawn
+              to make a series followable — nothing was measured in those gaps.
+            </p>
+
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-subtle">
               <span>
                 {formatNumber(series.length)} {series.length === 1 ? 'source' : 'independent sources'} ·{' '}
                 {formatNumber(observationCount)} observations
@@ -553,6 +633,37 @@ export function TrendDetailPage() {
                 ))}
               </ul>
 
+              {/*
+                The bars explain the logit only. Two multipliers are applied after
+                it, and they routinely move the score more than any single
+                component does — leaving them out of this card would make the
+                chart look like the whole explanation when it is roughly half.
+              */}
+              {breakdown?.rawScore !== undefined && (
+                <dl className="mt-4 space-y-1.5 border-t border-border pt-3 text-xs">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <dt className="text-ink-muted">Raw score from the components above</dt>
+                    <dd className="tnum text-ink">{formatScore(breakdown.rawScore, 1)}</dd>
+                  </div>
+                  {breakdown.saturationMultiplier !== undefined && (
+                    <div className="flex items-baseline justify-between gap-3">
+                      <dt className="text-ink-muted">× saturation multiplier (how much is already tokenised)</dt>
+                      <dd className="tnum text-ink">{formatPercent(breakdown.saturationMultiplier, 0)}</dd>
+                    </div>
+                  )}
+                  {breakdown.evidenceMultiplier !== undefined && (
+                    <div className="flex items-baseline justify-between gap-3">
+                      <dt className="text-ink-muted">× growth-evidence multiplier (is attention measurably rising)</dt>
+                      <dd className="tnum text-ink">{formatPercent(breakdown.evidenceMultiplier, 0)}</dd>
+                    </div>
+                  )}
+                  <div className="flex items-baseline justify-between gap-3 border-t border-border/60 pt-1.5">
+                    <dt className="font-medium text-ink">Final opportunity score</dt>
+                    <dd className="tnum font-semibold text-ink">{formatScore(trend.opportunityScore, 1)}</dd>
+                  </div>
+                </dl>
+              )}
+
               {breakdown && breakdown.rationale.length > 0 && (
                 <div className="mt-4 space-y-1.5 border-t border-border pt-3">
                   {breakdown.rationale.map((line) => (
@@ -574,20 +685,23 @@ export function TrendDetailPage() {
           <dl className="mt-4 space-y-3">
             <Kinetic
               term="Velocity"
-              value={`${formatPercent(trend.velocity, 2)}/h`}
+              value={rateEstimable ? `${formatPercent(trend.velocity, 2)}/h` : 'Not measurable'}
+              unknown={!rateEstimable}
               tone={trend.velocity > 0 ? 'positive' : trend.velocity < 0 ? 'negative' : 'neutral'}
               explanation="Fractional growth per hour. +10%/h is roughly a tripling over a day."
             />
             <Kinetic
               term="Acceleration"
-              value={formatPercent(trend.acceleration, 2)}
+              value={rateEstimable ? formatPercent(trend.acceleration, 2) : 'Not measurable'}
+              unknown={!rateEstimable}
               tone={trend.acceleration > 0 ? 'positive' : trend.acceleration < 0 ? 'warning' : 'neutral'}
               explanation="Change in velocity. Positive means still speeding up; negative means the wave is already breaking."
             />
             <Kinetic
               term="Consistency"
-              value={formatPercent(trend.consistency, 0)}
-              bar={trend.consistency}
+              value={rateEstimable ? formatPercent(trend.consistency, 0) : 'Not measurable'}
+              unknown={!rateEstimable}
+              bar={rateEstimable ? trend.consistency : undefined}
               explanation="How steadily interest climbs rather than arriving as one spike. Spikes are usually bots or a single viral post."
             />
             <Kinetic
@@ -609,9 +723,18 @@ export function TrendDetailPage() {
             />
             <Kinetic
               term="Memeability"
-              value={formatPercent(trend.memeability, 0)}
-              bar={trend.memeability}
-              explanation="Model-assessed ease of turning the idea into a name and an image. A judgement, not a measurement."
+              // Memeability is only ever written by the AI enrichment pass, which
+              // writes the summary in the same call. No summary means no pass has
+              // run, so the stored 0 is an unset default rather than a verdict of
+              // "not memeable" — and must not be dressed up as a model judgement.
+              value={enriched ? formatPercent(trend.memeability, 0) : 'Not assessed'}
+              unknown={!enriched}
+              bar={enriched ? trend.memeability : undefined}
+              explanation={
+                enriched
+                  ? 'Model-assessed ease of turning the idea into a name and an image. A judgement, not a measurement.'
+                  : 'No AI enrichment pass has run for this trend, so no model has judged it. The score was computed with this component at zero.'
+              }
             />
           </dl>
           <div className="mt-4 border-t border-border pt-3">
@@ -774,12 +897,15 @@ function Kinetic({
   explanation,
   bar,
   tone = 'neutral',
+  unknown = false,
 }: {
   term: string;
   value: string;
   explanation: string;
   bar?: number;
   tone?: Tone;
+  /** The figure could not be measured. Suppresses the value tone so an unknown never reads as a good or bad reading. */
+  unknown?: boolean;
 }) {
   return (
     <div className="border-b border-border/60 pb-3 last:border-b-0 last:pb-0">
@@ -788,13 +914,15 @@ function Kinetic({
         <dd
           className={
             'tnum text-sm font-semibold ' +
-            (tone === 'positive'
-              ? 'text-positive'
-              : tone === 'negative'
-                ? 'text-negative'
-                : tone === 'warning'
-                  ? 'text-warning'
-                  : 'text-ink')
+            (unknown
+              ? 'text-warning'
+              : tone === 'positive'
+                ? 'text-positive'
+                : tone === 'negative'
+                  ? 'text-negative'
+                  : tone === 'warning'
+                    ? 'text-warning'
+                    : 'text-ink')
           }
         >
           {value}

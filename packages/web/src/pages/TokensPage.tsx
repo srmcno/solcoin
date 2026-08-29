@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Badge,
@@ -132,6 +132,21 @@ interface SortState {
   dir: 'asc' | 'desc';
 }
 
+/**
+ * The API reports polls/hour for the tier as a whole. Read on its own beside a
+ * token count that is a different number, that invites the wrong reading, so
+ * the per-token interval it implies is spelled out underneath.
+ */
+function perTokenInterval(tier: MonitoringTier): string {
+  if (!Number.isFinite(tier.pollsPerHour) || tier.pollsPerHour <= 0 || tier.count <= 0) {
+    return 'No polling interval reported.';
+  }
+  const seconds = 3600 / (tier.pollsPerHour / tier.count);
+  if (seconds < 90) return `≈ every ${Math.round(seconds)}s per token`;
+  if (seconds < 5400) return `≈ every ${Math.round(seconds / 60)}m per token`;
+  return `≈ every ${(seconds / 3600).toFixed(1)}h per token`;
+}
+
 function isSimulated(token: Token): boolean {
   return (token.network ?? 'simulation') === 'simulation';
 }
@@ -222,9 +237,19 @@ export function TokensPage() {
   // ever earned a lamport of creator fees?
   const earning = tokens.filter((t) => num(t.creatorFeesTotalSol) > 0).length;
   const earningRate = tokens.length > 0 ? earning / tokens.length : 0;
-  const totalFees = tokens.reduce((sum, t) => sum + num(t.creatorFeesTotalSol), 0);
+  const totalAccrued = tokens.reduce((sum, t) => sum + num(t.creatorFeesAccruedSol), 0);
+  const totalCollected = tokens.reduce((sum, t) => sum + num(t.creatorFeesCollectedSol), 0);
+  const totalFees = totalAccrued + totalCollected;
   const simulatedCount = tokens.filter(isSimulated).length;
   const truncated = tokens.length >= PAGE_LIMIT;
+
+  /**
+   * The denominator for the truncation note has to match the filter that
+   * produced the rows. Comparing a lifecycle-filtered page against the global
+   * total would overstate how much of the history is missing.
+   */
+  const scopeTotal = tab === 'all' ? totalTracked : num(lifecycleCounts[tab]);
+  const scopeLabel = tab === 'all' ? 'the tokens loaded below' : `the ${humanise(tab)} tokens loaded below`;
 
   const toggleSort = (key: SortKey) => {
     setSort((current) =>
@@ -277,29 +302,52 @@ export function TokensPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <StatTile label="Tokens tracked" value={formatNumber(totalTracked)} hint="Across every lifecycle stage." />
+            <StatTile
+              label="Tokens tracked"
+              value={<Metric>{formatNumber(totalTracked)}</Metric>}
+              hint="Every token in the database, across every lifecycle stage. The three tiles beside this one count only the page loaded below."
+            />
             <StatTile
               label="Have earned anything"
-              value={formatNumber(earning)}
+              value={<Metric>{formatNumber(earning)}</Metric>}
               tone={earning > 0 ? 'positive' : 'neutral'}
               hint={
                 <span className="inline-flex flex-wrap items-center gap-1.5">
-                  {formatPercent(earningRate, 0)} of the loaded set
+                  {formatPercent(earningRate, 0)} of {scopeLabel}
                   <SampleSize n={tokens.length} />
                 </span>
               }
             />
             <StatTile
               label="Creator fees, loaded set"
-              value={formatSol(totalFees, { digits: 4 })}
-              tone={totalFees > 0 ? 'positive' : 'neutral'}
-              hint="Accrued plus collected, summed over the tokens shown below."
+              value={<Metric>{formatSol(totalFees, { digits: 4 })}</Metric>}
+              tone={totalCollected > 0 ? 'positive' : 'neutral'}
+              hint={
+                <span className="block space-y-0.5">
+                  <span className="block">
+                    Collected (in the wallet):{' '}
+                    <span className="tnum text-ink-muted">{formatSol(totalCollected, { digits: 4 })}</span>
+                  </span>
+                  <span className="block">
+                    Accrued (still unclaimed):{' '}
+                    <span className="tnum text-ink-muted">{formatSol(totalAccrued, { digits: 4 })}</span>
+                  </span>
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    Summed over {scopeLabel} <SampleSize n={tokens.length} />
+                  </span>
+                </span>
+              }
             />
             <StatTile
               label="Simulated"
-              value={formatNumber(simulatedCount)}
+              value={<Metric>{formatNumber(simulatedCount)}</Metric>}
               tone={simulatedCount > 0 ? 'warning' : 'neutral'}
-              hint="Tokens with no on-chain existence. Their numbers are model output, not market data."
+              hint={
+                <span className="inline-flex flex-wrap items-center gap-1.5">
+                  No on-chain existence; their figures are simulator output, not market data. Counted over {scopeLabel}
+                  <SampleSize n={tokens.length} />
+                </span>
+              }
             />
           </div>
 
@@ -317,8 +365,10 @@ export function TokensPage() {
           {truncated && (
             <Note tone="neutral">
               Showing the {formatNumber(tokens.length)} most recently created tokens
-              {tab === 'all' ? '' : ` in ${humanise(tab)}`} out of {formatNumber(totalTracked)} tracked. Sorting below
-              reorders this page only — it does not search the full history.
+              {tab === 'all' ? '' : ` in ${humanise(tab)}`} out of {formatNumber(scopeTotal)}
+              {tab === 'all' ? ' tracked' : ` in that stage`}. Sorting below reorders this page only — it does not
+              search the full history, so the top row is the best of these {formatNumber(tokens.length)} and not
+              necessarily the best overall.
             </Note>
           )}
 
@@ -433,7 +483,22 @@ export function TokensPage() {
                             {num(token.marketCapUsd) > 0 ? formatUsd(token.marketCapUsd, { compact: true }) : '—'}
                           </Td>
                           <Td align="right" className={`tnum ${fees > 0 ? 'text-positive' : 'text-ink-subtle'}`}>
-                            {fees > 0 ? formatSol(fees, { digits: 4 }) : 'none'}
+                            {fees > 0 ? (
+                              <span
+                                title={`Collected (in the wallet): ${formatSol(token.creatorFeesCollectedSol, {
+                                  digits: 6,
+                                })} · Accrued (still unclaimed): ${formatSol(token.creatorFeesAccruedSol, {
+                                  digits: 6,
+                                })}`}
+                              >
+                                {formatSol(fees, { digits: 4 })}
+                                {num(token.creatorFeesCollectedSol) <= 0 && (
+                                  <span className="ml-1 text-xs font-normal text-ink-subtle">unclaimed</span>
+                                )}
+                              </span>
+                            ) : (
+                              'none'
+                            )}
                           </Td>
                           <Td align="right" className="tnum">
                             {age === null ? '—' : formatDuration(age)}
@@ -472,6 +537,16 @@ export function TokensPage() {
                 </DataTable>
               )}
             </div>
+
+            {tokens.length > 0 && (
+              <div className="px-4 pb-4 sm:px-5">
+                <Note tone="neutral">
+                  <strong>Fees earned</strong> is accrued plus collected. Accrued fees are a claim on a vault that a
+                  collection transaction still has to succeed against; only the collected part has reached the wallet.
+                  Hover any figure for the split, or open a token for its full fee history.
+                </Note>
+              </div>
+            )}
           </Card>
 
           <Card>
@@ -502,8 +577,9 @@ export function TokensPage() {
                       </div>
                       <div className="tnum mt-2 text-lg font-semibold text-ink">
                         {formatCompact(tier.pollsPerHour)}
-                        <span className="ml-1 text-xs font-normal text-ink-subtle">polls/hour</span>
+                        <span className="ml-1 text-xs font-normal text-ink-subtle">polls/hour, whole tier</span>
                       </div>
+                      <p className="tnum mt-0.5 text-xs text-ink-subtle">{perTokenInterval(tier)}</p>
                       <p className="mt-1 text-xs leading-relaxed text-ink-subtle">
                         {TIER_MEANING[tier.tier] ?? 'Custom monitoring tier.'}
                       </p>
@@ -584,10 +660,23 @@ function TokenArtwork({ token }: { token: Token }) {
       src={token.imageUri}
       alt=""
       loading="lazy"
+      // The URI is operator- or model-supplied and points at an arbitrary host,
+      // so it must not carry the dashboard URL along with the request.
+      referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
       className="h-8 w-8 shrink-0 rounded-lg border border-border object-cover"
     />
   );
+}
+
+/**
+ * A headline figure that can wrap rather than push the page sideways.
+ *
+ * A four-decimal SOL amount at `text-2xl` is wider than a half-width tile on a
+ * 375px screen, and an overflowing number scrolls the whole document.
+ */
+function Metric({ children }: { children: ReactNode }) {
+  return <span className="block break-words text-xl sm:text-2xl">{children}</span>;
 }
 
 export default TokensPage;

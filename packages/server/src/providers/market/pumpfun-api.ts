@@ -149,6 +149,8 @@ const CURVE_SUPPLY_FRACTION = STANDARD_CURVE_TOKENS_UI / STANDARD_TOTAL_SUPPLY_U
 
 /** Solana mints are base58 and always land in this length range. */
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+/** Base58 transaction signatures are 64 bytes and encode to this length range. */
+const SIGNATURE_RE = /^[1-9A-HJ-NP-Za-km-z]{64,96}$/;
 
 /**
  * Quote mints that mean "the curve is priced in SOL". pump.fun uses the System
@@ -894,7 +896,10 @@ function toTokenMarketData(
 
   const complete = typeof raw['complete'] === 'boolean' ? raw['complete'] : undefined;
   const pumpSwapPool = asString(raw['pump_swap_pool']);
-  const program = asString(raw['program']);
+  // Server-authored enum ('pump' | 'pump_amm'), but it is still a free string on
+  // the wire and it reaches saturation analysis, so it is capped and sanitised
+  // like any other external text rather than trusted as a closed set.
+  const program = sanitiseOptional(asString(raw['program']), 32);
   const onAmm = program === 'pump_amm' || pumpSwapPool !== null || complete === true;
 
   const marketCapSol = finiteNumber(raw['market_cap']);
@@ -986,8 +991,13 @@ function toTokenMarketData(
     // absent rather than reported as graduated.
     ...optional('graduated', realTokenReserves !== undefined ? complete : undefined),
     // Once migrated, the PumpSwap pool is the venue that matters; before that the
-    // bonding curve is the only place the coin trades.
-    ...optional('poolAddress', pumpSwapPool ?? asString(raw['pool_address']) ?? asString(raw['bonding_curve'])),
+    // bonding curve is the only place the coin trades. Every candidate is shape-
+    // validated as base58: this field is handed to callers as an address to act
+    // on, so an unvalidated string here would flow straight into a lookup.
+    ...optional(
+      'poolAddress',
+      asBase58(raw['pump_swap_pool']) ?? asBase58(raw['pool_address']) ?? asBase58(raw['bonding_curve']),
+    ),
     ...optional('bondingCurveProgress', curve.progress),
     source: SOURCE,
     observedAt: ctx.observedAt,
@@ -1084,7 +1094,9 @@ function computeCurveProgress(input: {
 
 function toTrade(raw: unknown): PumpFunTrade | null {
   if (!isRecord(raw)) return null;
-  const signature = asString(raw['tx']) ?? asString(raw['signature']);
+  // Shape-validated, not merely non-empty: a signature is quoted back to callers
+  // as an on-chain reference and gets pasted into explorer links.
+  const signature = asSignature(raw['tx']) ?? asSignature(raw['signature']);
   const userAddress = asBase58(raw['userAddress']);
   const type = asString(raw['type']);
   if (!signature || !userAddress || (type !== 'buy' && type !== 'sell')) return null;
@@ -1099,7 +1111,7 @@ function toTrade(raw: unknown): PumpFunTrade | null {
     timestampMs,
     userAddress,
     side: type,
-    ...optional('program', asString(raw['program'])),
+    ...optional('program', sanitiseOptional(asString(raw['program']), 32)),
     // Every numeric on this endpoint is a high-precision decimal STRING.
     ...optional('priceUsd', finiteNumber(raw['priceUsd'])),
     ...optional('priceSol', finiteNumber(raw['priceSol'])),
@@ -1161,6 +1173,12 @@ function asBoolean(value: unknown): boolean | undefined {
 function asBase58(value: unknown): string | undefined {
   const s = asString(value);
   return s && MINT_RE.test(s) ? s : undefined;
+}
+
+/** Base58 transaction signature, validated by shape for the same reason. */
+function asSignature(value: unknown): string | undefined {
+  const s = asString(value);
+  return s && SIGNATURE_RE.test(s) ? s : undefined;
 }
 
 function finiteNumber(value: unknown): number | undefined {

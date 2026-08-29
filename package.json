@@ -4,8 +4,14 @@
   "private": true,
   "type": "module",
   "description": "Autonomous AI token launch, research, monitoring and creator-fee platform for Solana / Pump.fun",
-  "engines": { "node": ">=20.11" },
-  "workspaces": ["packages/shared", "packages/server", "packages/web"],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web"
+  ],
   "scripts": {
     "build": "npm run build -w @solcoin/shared && npm run build -w @solcoin/server && npm run build -w @solcoin/web",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @solcoin/server\" \"npm run dev -w @solcoin/web\"",
@@ -21,10 +27,15 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^3.2.7",
     "concurrently": "^9.1.2",
+    "playwright": "^1.62.1",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "vite": "^6.4.3"
   }
 }

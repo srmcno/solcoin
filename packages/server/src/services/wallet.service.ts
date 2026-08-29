@@ -111,12 +111,26 @@ export class WalletService {
     const config = this.settings.get();
     const network = config.execution.network;
 
-    // Simulation has no chain to read; the balance is a configured float so the
-    // limit machinery can be exercised end to end without funds.
+    // Simulation has no chain to read. When no wallet has been configured there
+    // is deliberately nothing to register: inventing an address and a balance
+    // would put a fabricated figure on the dashboard and make an unconfigured
+    // wallet look like a degraded one.
     if (network === 'simulation' || !this.rpc) {
-      const address = (await this.keystore.getPublicKey()) ?? 'SIMULATED';
+      const record = await this.keystore.getRecord();
+      if (!record) return { operating: null, treasury: null };
+
+      // A configured wallet gets a simulated float so the spending limits are
+      // exercised end to end. Its custody is reported truthfully, and the
+      // balance is labelled as simulated everywhere it is displayed.
       const simulated = solToLamports(2);
-      this.upsertAccount(address, 'operating', network, simulated, 'watch_only', false);
+      this.upsertAccount(
+        record.publicKey,
+        'operating',
+        network,
+        simulated,
+        record.custody,
+        record.custody === 'encrypted_keystore',
+      );
       return { operating: simulated, treasury: null };
     }
 

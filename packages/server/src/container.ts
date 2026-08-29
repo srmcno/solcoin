@@ -525,7 +525,7 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
       const adapter = state.adapters.get(network === 'simulation' ? 'simulation' : 'pumpfun_sdk');
       if (!adapter) return { shouldCollect: false, reason: 'No execution adapter is available.' };
       const snapshot = await fees.snapshotAccruals(adapter, creator);
-      return fees.decideCollection(snapshot, fees.lastCollectionAt(creator));
+      return fees.decideCollection(snapshot, fees.collectionTiming(creator));
     },
 
     async collectFeesNow(actor) {

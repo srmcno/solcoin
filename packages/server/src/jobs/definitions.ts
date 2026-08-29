@@ -340,7 +340,7 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
         if (!adapter) return { itemsProcessed: 0 };
 
         const snapshot = await container.fees.snapshotAccruals(adapter, creator);
-        const decision = container.fees.decideCollection(snapshot, container.fees.lastCollectionAt(creator));
+        const decision = container.fees.decideCollection(snapshot, container.fees.collectionTiming(creator));
         if (!decision.shouldCollect) {
           return { itemsProcessed: 0, result: { skipped: decision.reason } };
         }

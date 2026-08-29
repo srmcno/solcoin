@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   Area,
@@ -204,6 +204,15 @@ function lamportsToSol(lamports: unknown): number {
   return num(lamports) / LAMPORTS_PER_SOL;
 }
 
+function distinctSources(rows: Array<{ source?: string | null }>): string[] {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const source = typeof row.source === 'string' ? row.source.trim() : '';
+    if (source) seen.add(source);
+  }
+  return [...seen].sort().map((s) => humanise(s));
+}
+
 function shortTime(t: number): string {
   return new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
@@ -241,12 +250,17 @@ export function TokenDetailPage() {
           t: num(o.observed_at),
           marketCapUsd: maybeNum(o.market_cap_usd),
           volume24hSol: maybeNum(o.volume_24h_sol),
-          liquidityUsd: maybeNum(o.liquidity_usd),
         }))
         .filter((row) => row.t > 0)
         .sort((a, b) => a.t - b.t),
     [observations],
   );
+
+  // Which providers these points came from. Observations are deduplicated per
+  // (token, source, time), so two providers that disagree both end up on the
+  // same line — the reader has to be told when that is happening.
+  const marketSources = useMemo(() => distinctSources(observations), [observations]);
+  const holderSources = useMemo(() => distinctSources(holderSnapshots), [holderSnapshots]);
 
   const holderSeries = useMemo(
     () =>
@@ -312,8 +326,19 @@ export function TokenDetailPage() {
   const accrued = num(token.creatorFeesAccruedSol);
   const collected = num(token.creatorFeesCollectedSol);
   const totalFees = num(token.creatorFeesTotalSol);
-  const gini = latestHolderSnapshot?.gini ?? maybeNum(token.holderGini);
+  // Collections are not free. Netting the transaction cost off is the only
+  // honest way to state what this token has actually returned.
+  const networkFeesPaid = feeEvents.reduce((sum, e) => sum + lamportsToSol(e.network_fee_lamports), 0);
+  // `holder_gini` is NOT NULL DEFAULT 0 in the schema, so an unmeasured token
+  // reports 0 — which reads as "perfectly evenly distributed" and would earn a
+  // green "relatively well spread" verdict for a token nobody has ever scanned.
+  // A real Gini of exactly 0 does not occur, so treat it as not measured.
+  const recordedGini = num(token.holderGini) > 0 ? num(token.holderGini) : null;
+  const gini = latestHolderSnapshot?.gini ?? recordedGini;
   const top10Share = latestHolderSnapshot?.top10Share ?? null;
+  const concentrationFromSnapshot =
+    latestHolderSnapshot !== undefined &&
+    (latestHolderSnapshot.gini !== null || latestHolderSnapshot.top10Share !== null);
 
   return (
     <div className="space-y-5">
@@ -391,7 +416,7 @@ export function TokenDetailPage() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile
           label="Market cap"
-          value={num(token.marketCapUsd) > 0 ? formatUsd(token.marketCapUsd, { compact: true }) : '—'}
+          value={<Metric>{num(token.marketCapUsd) > 0 ? formatUsd(token.marketCapUsd, { compact: true }) : '—'}</Metric>}
           hint={
             num(token.peakMarketCapUsd) > 0
               ? `Peak ${formatUsd(token.peakMarketCapUsd, { compact: true })}`
@@ -400,24 +425,24 @@ export function TokenDetailPage() {
         />
         <StatTile
           label="Holders"
-          value={formatNumber(token.holders)}
+          value={<Metric>{formatNumber(token.holders)}</Metric>}
           hint={`Peak ${formatNumber(token.peakHolders)}${holderSeries.length > 0 ? ` · ${holderSeries.length} snapshots` : ' · no snapshots recorded'}`}
         />
         <StatTile
           label="24h volume"
-          value={formatSol(token.volume24hSol, { digits: 3 })}
+          value={<Metric>{formatSol(token.volume24hSol, { digits: 3 })}</Metric>}
           hint={
             num(token.peakVolume24hSol) > 0 ? `Peak 24h ${formatSol(token.peakVolume24hSol, { digits: 3 })}` : undefined
           }
         />
         <StatTile
           label="Total volume"
-          value={formatSol(token.volumeTotalSol, { digits: 3 })}
+          value={<Metric>{formatSol(token.volumeTotalSol, { digits: 3 })}</Metric>}
           hint={`${formatNumber(token.txCount)} transactions recorded`}
         />
         <StatTile
           label="Creator fees earned"
-          value={formatSol(totalFees, { digits: 4 })}
+          value={<Metric>{formatSol(totalFees, { digits: 4 })}</Metric>}
           tone={totalFees > 0 ? 'positive' : 'neutral'}
           hint={
             <span className="block space-y-0.5">
@@ -432,12 +457,12 @@ export function TokenDetailPage() {
         />
         <StatTile
           label="Age"
-          value={age === null ? '—' : formatDuration(age)}
+          value={<Metric>{age === null ? '—' : formatDuration(age)}</Metric>}
           hint={born ? `Created ${formatDateTime(born)}` : 'No creation timestamp recorded.'}
         />
         <StatTile
           label="Last trade"
-          value={token.lastTradeAt ? formatRelative(token.lastTradeAt, now) : 'never'}
+          value={<Metric>{token.lastTradeAt ? formatRelative(token.lastTradeAt, now) : 'never'}</Metric>}
           tone={!token.lastTradeAt ? 'warning' : 'neutral'}
           hint={
             token.firstTradeAt
@@ -447,7 +472,7 @@ export function TokenDetailPage() {
         />
         <StatTile
           label="Liquidity"
-          value={num(token.liquidityUsd) > 0 ? formatUsd(token.liquidityUsd, { compact: true }) : '—'}
+          value={<Metric>{num(token.liquidityUsd) > 0 ? formatUsd(token.liquidityUsd, { compact: true }) : '—'}</Metric>}
           hint={token.dataSource ? `Source: ${humanise(token.dataSource)}` : 'No data source recorded.'}
         />
       </div>
@@ -573,6 +598,7 @@ export function TokenDetailPage() {
                   />
                   24h volume (dashed)
                 </span>
+                {marketSources.length > 0 && <span>Source: {marketSources.join(', ')}</span>}
                 <SampleSize n={marketSeries.length} />
               </div>
               {marketSeries.length < 8 && (
@@ -580,6 +606,15 @@ export function TokenDetailPage() {
                   <Note tone="warning">
                     Only {formatNumber(marketSeries.length)} observations exist. The shape of this line is an artefact
                     of how often the token was polled, not a reliable price history.
+                  </Note>
+                </div>
+              )}
+              {marketSources.length > 1 && (
+                <div className="mt-3">
+                  <Note tone="warning">
+                    These points come from {formatNumber(marketSources.length)} different providers (
+                    {marketSources.join(', ')}) plotted on one line. Where they disagree the line will step between
+                    them, and that step is a disagreement between sources rather than a movement in the market.
                   </Note>
                 </div>
               )}
@@ -663,6 +698,7 @@ export function TokenDetailPage() {
                   {formatNumber(holderSeries.length)} snapshots between {shortTime(num(holderSeries[0]?.t))} and{' '}
                   {shortTime(num(latestHolderSnapshot?.t))}
                 </span>
+                {holderSources.length > 0 && <span>Source: {holderSources.join(', ')}</span>}
                 <SampleSize n={holderSeries.length} />
               </div>
             </>
@@ -699,11 +735,15 @@ export function TokenDetailPage() {
               scale="Share of circulating supply held by the ten largest wallets"
             />
             <div className="sm:col-span-2">
-              {holderSeries.length === 0 ? (
-                <Note tone="warning">Concentration is taken from the token record; no snapshot history backs it.</Note>
+              {!concentrationFromSnapshot ? (
+                <Note tone="warning">
+                  These figures come from the denormalised token record, not from a stored holder snapshot, so there is
+                  no history behind them and no way to tell how old the underlying scan is.
+                </Note>
               ) : (
                 <p className="text-xs text-ink-subtle">
-                  Measured on the most recent snapshot, {formatRelative(num(latestHolderSnapshot?.t), now)}.{' '}
+                  Measured on the most recent snapshot, {formatRelative(num(latestHolderSnapshot?.t), now)}
+                  {holderSources.length > 0 ? ` via ${holderSources.join(', ')}` : ''}.{' '}
                   <SampleSize n={holderSeries.length} />
                 </p>
               )}
@@ -742,7 +782,9 @@ export function TokenDetailPage() {
                   <Th>Vault</Th>
                   <Th align="right">Amount</Th>
                   <Th align="right">Claimable</Th>
+                  <Th align="right">Network fee paid</Th>
                   <Th align="right">USD at the time</Th>
+                  <Th>Recorded by</Th>
                   <Th>Transaction</Th>
                 </tr>
               </thead>
@@ -750,6 +792,7 @@ export function TokenDetailPage() {
                 {feeEvents.map((event, index) => {
                   const kind = event.kind ?? 'unknown';
                   const signature = event.transaction_signature ?? null;
+                  const networkFee = lamportsToSol(event.network_fee_lamports);
                   return (
                     <tr key={event.id ?? `${kind}-${index}`} className="transition-colors hover:bg-surface-hover/60">
                       <Td className="tnum whitespace-nowrap">{formatDateTime(maybeNum(event.observed_at))}</Td>
@@ -765,9 +808,13 @@ export function TokenDetailPage() {
                       <Td align="right" className="tnum">
                         {formatSol(lamportsToSol(event.claimable_lamports), { digits: 6 })}
                       </Td>
+                      <Td align="right" className="tnum text-ink-subtle">
+                        {networkFee > 0 ? `−${formatSol(networkFee, { digits: 6 })}` : '—'}
+                      </Td>
                       <Td align="right" className="tnum">
                         {maybeNum(event.usd_value) === null ? '—' : formatUsd(event.usd_value)}
                       </Td>
+                      <Td className="text-xs text-ink-subtle">{humanise(event.source)}</Td>
                       <Td>
                         {!signature ? (
                           <span className="text-xs text-ink-subtle">—</span>
@@ -791,15 +838,25 @@ export function TokenDetailPage() {
                 })}
               </tbody>
             </DataTable>
-            {accrued > 0 && (
-              <div className="mt-3">
+            <div className="mt-3 space-y-2">
+              {accrued > 0 && (
                 <Note tone="neutral">
                   <strong className="tnum">{formatSol(accrued, { digits: 4 })}</strong> is accrued but not yet
                   collected. Accrued fees are a claim on a vault, not money in the wallet; a collection transaction has
                   to succeed before it counts as revenue.
                 </Note>
-              </div>
-            )}
+              )}
+              {networkFeesPaid > 0 && (
+                <Note tone={collected - networkFeesPaid <= 0 ? 'warning' : 'neutral'}>
+                  <strong className="tnum">{formatSol(networkFeesPaid, { digits: 6 })}</strong> has been paid in
+                  network fees to collect against this token, against{' '}
+                  <strong className="tnum">{formatSol(collected, { digits: 6 })}</strong> collected — a net of{' '}
+                  <strong className="tnum">{formatSol(collected - networkFeesPaid, { digits: 6 })}</strong>.
+                  {collected - networkFeesPaid <= 0 &&
+                    ' Collecting from this token has cost more than it has returned.'}
+                </Note>
+              )}
+            </div>
           </div>
         )}
       </Card>
@@ -1234,7 +1291,20 @@ function ConcentrationMeter({
         <span className="text-xs font-medium uppercase tracking-wide text-ink-subtle">{label}</span>
         <span className="tnum text-lg font-semibold text-ink">{display}</span>
       </div>
-      <ScoreBar className="mt-2" value={value ?? 0} max={1} invert />
+      {/*
+        A null value must not fall back to a zero-width bar: on an inverted
+        scale that renders as the healthiest possible reading, which is the
+        opposite of "we never measured this".
+      */}
+      {value === null ? (
+        <div
+          className="mt-2 h-1.5 w-full rounded-full border border-dashed border-border"
+          role="img"
+          aria-label={`${label}: not measured`}
+        />
+      ) : (
+        <ScoreBar className="mt-2" value={value} max={1} invert />
+      )}
       <p className="mt-1.5 text-[11px] text-ink-subtle">{scale}</p>
       <p
         className={`mt-1.5 text-xs leading-relaxed ${
@@ -1333,10 +1403,22 @@ function Artwork({ token }: { token: Token }) {
     <img
       src={token.imageUri}
       alt=""
+      // Operator- or model-supplied URI pointing at an arbitrary host; it must
+      // not carry the dashboard URL along with the request.
+      referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
       className="h-12 w-12 shrink-0 rounded-xl border border-border object-cover"
     />
   );
+}
+
+/**
+ * A headline figure that wraps instead of pushing the page sideways. A
+ * six-decimal SOL amount at `text-2xl` is wider than a half-width tile on a
+ * 375px screen, and an overflowing number scrolls the whole document.
+ */
+function Metric({ children }: { children: ReactNode }) {
+  return <span className="block break-words text-xl sm:text-2xl">{children}</span>;
 }
 
 function MarketTooltip({

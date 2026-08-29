@@ -125,8 +125,7 @@ interface TrendEvidence {
 const NO_EVIDENCE: TrendEvidence = { scored: false, rateEstimable: false, observations: null, spanHours: null };
 
 function finiteOrNull(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function readEvidence(raw: unknown): TrendEvidence {
@@ -186,8 +185,16 @@ export function OpportunitiesPage() {
     const sorted = [...filtered];
     sorted.sort((a, b) => {
       switch (sort) {
-        case 'velocity':
+        case 'velocity': {
+          // A trend whose rate is not estimable has a stored velocity of 0 that
+          // means "unknown", not "flat". Ranking it among the genuinely flat
+          // trends would present that placeholder as a measurement, so
+          // unmeasurable rows sort below every measured one.
+          const aOk = readEvidence(a.scoreBreakdown).rateEstimable;
+          const bOk = readEvidence(b.scoreBreakdown).rateEstimable;
+          if (aOk !== bOk) return aOk ? -1 : 1;
           return b.velocity - a.velocity;
+        }
         case 'newest':
           return b.firstSeenAt - a.firstSeenAt;
         case 'saturation':
@@ -244,9 +251,9 @@ export function OpportunitiesPage() {
           }
         />
         <StatTile
-          label="Trends tracked"
+          label="Trends listed"
           value={query.isLoading ? '—' : formatNumber(trends.length)}
-          hint="Active trends returned by the scorer."
+          hint="Highest-scoring active trends this endpoint returns — not the size of the whole trend corpus."
         />
         <StatTile
           label="Quality gate"
@@ -367,7 +374,12 @@ export function OpportunitiesPage() {
                   ) : (
                     ' Check Settings → Jobs for the discovery schedule.'
                   )}
-                  {!can('run_research') && ' Ask an operator to trigger a run if you need results sooner.'}
+                  {!can('run_research') && ' Ask an operator to trigger a run if you need results sooner.'}{' '}
+                  Discovery only reads the sources that have credentials, which is a normal way to run — check{' '}
+                  <Link to="/health" className="text-accent-soft hover:underline">
+                    Health
+                  </Link>{' '}
+                  to see which sources are online and which are simply unconfigured.
                 </>
               }
               action={runButton}
@@ -376,7 +388,7 @@ export function OpportunitiesPage() {
             <EmptyState
               icon="⁝"
               title="No trends match these filters"
-              description={`${formatNumber(trends.length)} trends are tracked, but none match the current phase, category, score and threshold filters. Widen them to see the full set.`}
+              description={`${formatNumber(trends.length)} trends are listed, but none match the current phase, category, score and threshold filters. Widen them to see the full set.`}
               action={
                 <button
                   className="btn btn-ghost"
@@ -419,7 +431,7 @@ export function OpportunitiesPage() {
                 <Note tone="warning">
                   {formatNumber(unscored)} of {formatNumber(visible.length)} listed trends have been discovered but have
                   not been through a scoring pass. They are shown without a score rather than with the stored default of
-                  zero, and they sort last.
+                  zero.
                 </Note>
               )}
 
@@ -471,25 +483,60 @@ export function OpportunitiesPage() {
                           </div>
                         </Td>
                         <Td align="right" className="min-w-[9rem]">
-                          <div className="tnum text-sm font-semibold text-ink">{formatScore(t.opportunityScore, 1)}</div>
-                          <ScoreBar value={t.opportunityScore} max={100} className="mt-1.5" />
-                          <div className="mt-1 text-xs">
-                            {clears ? (
-                              <span className="text-positive">✓ Clears</span>
-                            ) : (
-                              <span className="text-ink-subtle">
-                                {generationThreshold === undefined
-                                  ? 'No threshold'
-                                  : `Below by ${formatScore(generationThreshold - t.opportunityScore, 1)}`}
-                              </span>
-                            )}
-                          </div>
+                          {evidence.scored ? (
+                            <>
+                              <div className="tnum text-sm font-semibold text-ink">
+                                {formatScore(t.opportunityScore, 1)}
+                              </div>
+                              <ScoreBar value={t.opportunityScore} max={100} className="mt-1.5" />
+                              <div className="mt-1 text-xs">
+                                {clears ? (
+                                  <span className="text-positive">✓ Clears</span>
+                                ) : (
+                                  <span className="text-ink-subtle">
+                                    {generationThreshold === undefined
+                                      ? 'No threshold'
+                                      : `Below by ${formatScore(generationThreshold - t.opportunityScore, 1)}`}
+                                  </span>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            // Never scored: the stored 0 is a column default, not a
+                            // result. No number and no bar, rather than a bar at zero.
+                            <>
+                              <div className="text-sm font-semibold text-ink-subtle">—</div>
+                              <div className="mt-1 text-xs text-warning">Not scored yet</div>
+                            </>
+                          )}
                         </Td>
                         <Td align="right" className="tnum whitespace-nowrap">
-                          <span className={t.velocity > 0 ? 'text-positive' : t.velocity < 0 ? 'text-negative' : ''}>
-                            {t.velocity > 0 ? '▲' : t.velocity < 0 ? '▼' : ''} {formatPercent(t.velocity, 1)}/h
-                          </span>
-                          <div className="text-xs text-ink-subtle">accel {formatPercent(t.acceleration, 2)}</div>
+                          {evidence.rateEstimable ? (
+                            <>
+                              <span
+                                className={t.velocity > 0 ? 'text-positive' : t.velocity < 0 ? 'text-negative' : ''}
+                              >
+                                {t.velocity > 0 ? '▲' : t.velocity < 0 ? '▼' : ''} {formatPercent(t.velocity, 1)}/h
+                              </span>
+                              <div className="text-xs text-ink-subtle">accel {formatPercent(t.acceleration, 2)}</div>
+                              {evidence.observations !== null && (
+                                <div className="mt-0.5">
+                                  <SampleSize n={evidence.observations} minimum={8} />
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-xs font-medium text-warning">Not measurable</span>
+                              <div className="text-xs leading-snug text-ink-subtle">
+                                {evidence.observations === null
+                                  ? 'Too little history to fit a rate'
+                                  : `${formatNumber(evidence.observations)} obs${
+                                      evidence.spanHours === null ? '' : ` over ${formatDuration(evidence.spanHours)}`
+                                    }`}
+                              </div>
+                            </>
+                          )}
                         </Td>
                         <Td align="right" className="min-w-[7rem]">
                           <div className="tnum text-sm">{formatPercent(t.saturationScore, 0)}</div>

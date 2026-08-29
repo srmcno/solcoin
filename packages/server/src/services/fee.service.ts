@@ -187,7 +187,19 @@ export class FeeService {
    * Returns a reason in every case, because "we did not collect" is a decision
    * the operator needs to be able to interrogate, not silence.
    */
-  decideCollection(snapshot: AccrualSnapshot, lastCollectionAt: number | null): CollectionDecision {
+  /**
+   * @param timing Two distinct reference points, deliberately not collapsed
+   *   into one. `lastCollectionAt` governs the minimum interval and is null on
+   *   a wallet that has never collected — where "too soon" cannot apply.
+   *   `accruingSince` governs the force interval and is the first observation
+   *   of a claimable balance; without it a never-collected wallet would report
+   *   an infinite interval and force-sweep its first dust accrual at a loss.
+   *   A bare number is accepted for convenience and treated as both.
+   */
+  decideCollection(
+    snapshot: AccrualSnapshot,
+    timing: number | null | { lastCollectionAt: number | null; accruingSince: number | null },
+  ): CollectionDecision {
     const config = this.settings.get().fees;
     const claimable = snapshot.totalClaimableLamports;
     const estimatedCostLamports = estimateClaimCostLamports({
@@ -207,12 +219,34 @@ export class FeeService {
       };
     }
 
+    // Below this, a claim can never pay for itself. Checked before anything
+    // else, including the force interval: a forced sweep that recovers less
+    // than it costs is still value-destroying.
+    if (claimable <= estimatedCostLamports) {
+      return {
+        shouldCollect: false,
+        reason: `Claiming ${lamportsToSol(claimable).toFixed(6)} SOL would cost ${lamportsToSol(estimatedCostLamports).toFixed(6)} SOL and therefore destroy value.`,
+        claimableLamports: claimable,
+        estimatedCostLamports,
+        valueRatio,
+      };
+    }
+
+    const { lastCollectionAt, accruingSince } =
+      typeof timing === 'object' && timing !== null
+        ? timing
+        : { lastCollectionAt: timing, accruingSince: timing };
+
     const thresholdLamports = solToLamports(config.collectionThresholdSol);
-    const hoursSince = lastCollectionAt ? (this.now() - lastCollectionAt) / TIME.hour : Infinity;
+    const hoursSinceCollection = lastCollectionAt === null ? Infinity : (this.now() - lastCollectionAt) / TIME.hour;
+    const hoursAccruing = accruingSince === null ? 0 : (this.now() - accruingSince) / TIME.hour;
 
     // The force interval exists so a slow earner is eventually swept rather
     // than accumulating forever below the threshold.
-    const forced = config.forceCollectionIntervalHours > 0 && hoursSince >= config.forceCollectionIntervalHours;
+    const forced =
+      accruingSince !== null &&
+      config.forceCollectionIntervalHours > 0 &&
+      hoursAccruing >= config.forceCollectionIntervalHours;
 
     if (!forced && claimable < thresholdLamports) {
       return {
@@ -234,21 +268,10 @@ export class FeeService {
       };
     }
 
-    if (hoursSince < config.minHoursBetweenCollections) {
+    if (hoursSinceCollection < config.minHoursBetweenCollections) {
       return {
         shouldCollect: false,
-        reason: `Last collection was ${hoursSince.toFixed(1)}h ago; the minimum interval is ${config.minHoursBetweenCollections}h.`,
-        claimableLamports: claimable,
-        estimatedCostLamports,
-        valueRatio,
-      };
-    }
-
-    // Below this, a claim can never pay for itself regardless of settings.
-    if (claimable <= estimatedCostLamports) {
-      return {
-        shouldCollect: false,
-        reason: `Claiming ${lamportsToSol(claimable).toFixed(6)} SOL would cost ${lamportsToSol(estimatedCostLamports).toFixed(6)} SOL and therefore destroy value.`,
+        reason: `Last collection was ${hoursSinceCollection.toFixed(1)}h ago; the minimum interval is ${config.minHoursBetweenCollections}h.`,
         claimableLamports: claimable,
         estimatedCostLamports,
         valueRatio,
@@ -258,7 +281,7 @@ export class FeeService {
     return {
       shouldCollect: true,
       reason: forced
-        ? `Forced sweep: ${hoursSince.toFixed(0)}h since the last collection.`
+        ? `Forced sweep: fees have been accruing for ${hoursAccruing.toFixed(0)}h without reaching the threshold.`
         : `Claimable ${lamportsToSol(claimable).toFixed(6)} SOL recovers ${valueRatio.toFixed(0)}x its transaction cost.`,
       claimableLamports: claimable,
       estimatedCostLamports,
@@ -392,6 +415,22 @@ export class FeeService {
       )
       .get(creator, fromMs, toMs) as { total: number };
     return row?.total ?? 0;
+  }
+
+  /**
+   * The two reference points collection timing depends on: when a collection
+   * last happened, and when the current balance started accruing.
+   */
+  collectionTiming(creator: string): { lastCollectionAt: number | null; accruingSince: number | null } {
+    const lastCollectionAt = this.lastCollectionAt(creator);
+    const row = this.db.$raw
+      .prepare(
+        `SELECT MIN(observed_at) AS first FROM creator_fee_events
+          WHERE wallet_address = ? AND kind = 'accrual_snapshot' AND claimable_lamports > 0
+            AND observed_at > COALESCE(?, 0)`,
+      )
+      .get(creator, lastCollectionAt) as { first: number | null } | undefined;
+    return { lastCollectionAt, accruingSince: row?.first ?? null };
   }
 
   lastCollectionAt(creator: string): number | null {
