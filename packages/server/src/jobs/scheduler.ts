@@ -151,6 +151,16 @@ export class JobScheduler {
     const job = this.jobs.get(name);
     if (!job) return { started: false, reason: `No job named "${name}".` };
     if (this.running.has(name)) return { started: false, reason: 'Already running.' };
+
+    // Disabling a job is an operational pause. A manual run that ignores it
+    // makes the pause meaningless — an owner who switched off the launch queue
+    // did so to stop launches happening, by any route.
+    const state = this.options.db.$raw.prepare('SELECT enabled FROM job_state WHERE job_name = ?').get(name) as
+      | { enabled: number }
+      | undefined;
+    if (state && !state.enabled) {
+      return { started: false, reason: `The "${name}" job is disabled. Re-enable it before running it by hand.` };
+    }
     void this.execute(job, 'manual');
     return { started: true };
   }

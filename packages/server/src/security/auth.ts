@@ -358,15 +358,29 @@ export class AuthService {
     const previous = this.db.$raw.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined;
     if (!previous) throw new AppError('not_found', 'Account not found.');
 
-    // The last owner cannot be demoted, or the platform becomes unadministrable.
-    if (previous.role === 'owner' && role !== 'owner') {
-      const owners = this.db.$raw.prepare(`SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND active = 1`).get() as {
-        n: number;
-      };
-      if (owners.n <= 1) throw new AppError('conflict', 'The last remaining owner cannot be demoted.');
-    }
+    /*
+     * The last owner cannot be demoted, or the platform becomes
+     * unadministrable — and the check has to be part of the write.
+     *
+     * Reading the count and then updating leaves a gap. Within one process
+     * nothing can interleave, but the documented split-process deployment runs
+     * two of them against the same database: both could read a count of two and
+     * both demote, leaving no owner and no account able to `manage_users`.
+     * Recovery would mean editing the database by hand. As a single conditional
+     * statement the second demotion sees the first.
+     */
+    const demotion = previous.role === 'owner' && role !== 'owner';
+    const changed = this.db.$raw
+      .prepare(
+        `UPDATE users SET role = ?, updated_at = ?
+          WHERE id = ?
+            AND (? = 0 OR (SELECT COUNT(*) FROM users WHERE role = 'owner' AND active = 1) > 1)`,
+      )
+      .run(role, this.now(), userId, demotion ? 1 : 0).changes;
 
-    this.db.$raw.prepare('UPDATE users SET role = ?, updated_at = ? WHERE id = ?').run(role, this.now(), userId);
+    if (changed === 0) {
+      throw new AppError('conflict', 'The last remaining owner cannot be demoted.');
+    }
     this.audit.record({
       actorType: 'user',
       actorId,

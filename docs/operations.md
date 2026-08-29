@@ -599,7 +599,7 @@ hosts will corrupt it), and only one host can be involved.
 | `GET /api/system/logs?limit&level&component` | `view` | Rows from `system_events` (30-day retention). `limit` max 500. |
 | `GET /api/jobs` | `view` | Job status plus the 40 most recent runs. |
 | `GET /api/jobs/:name/runs` | `view` | The 60 most recent runs of one job. |
-| `POST /api/jobs/:name/run` | `run_research` | Run a job now, outside its schedule. |
+| `POST /api/jobs/:name/run` | the job's own permission | Run a job now, outside its schedule. The permission required is the one that job's side effects need, not a blanket `run_research`: `launch-queue` and `launch-recovery` need `launch_token`, `fee-collect` needs `collect_fees`, `wallet-reconcile` needs `transfer_funds`, `candidate-pipeline` needs `generate_concepts`, `model-train` needs `manage_experiments`, `maintenance` needs `edit_limits`. Read-only jobs need `run_research`; any unlisted job the scheduler reports as side-effecting needs `edit_limits`, so forgetting to map a new one costs a permission check rather than an unintended launch. A **disabled** job is refused outright — disabling is an operational pause, and a manual run that ignored it would make the pause meaningless. |
 | `PATCH /api/jobs/:name` | `edit_limits` | `{ enabled?, intervalSeconds? }`. |
 | `POST /api/system/emergency-stop` | `emergency_stop` | Body `{ reason }`, 3–500 characters. |
 | `POST /api/system/emergency-release` | `emergency_stop` | Body `{ reason }`, 3–500 characters. |

@@ -88,3 +88,52 @@ describe('changing a password', () => {
     await expect(auth.login({ email: 'owner@example.invalid', password: PASSWORD })).resolves.toBeTruthy();
   });
 });
+
+describe('demoting the last owner', () => {
+  async function seedOwner(email: string): Promise<string> {
+    const user = await auth.createUser({
+      email,
+      password: 'quince-lantern-frosted-9412',
+      displayName: 'Owner',
+      role: 'owner',
+    });
+    return user.id;
+  }
+
+  function roleOf(id: string): string {
+    return (auth as unknown as { db: { $raw: { prepare: (s: string) => { get: (a: string) => { role: string } } } } }).db.$raw
+      .prepare('SELECT role FROM users WHERE id = ?')
+      .get(id).role;
+  }
+
+  it('refuses when they are the only one', async () => {
+    const only = (await auth.listUsers()).find((u) => u.role === 'owner');
+    await expect(auth.setRole(only!.id, 'analyst', 'actor')).rejects.toThrow(/last remaining owner/i);
+    expect(roleOf(only!.id)).toBe('owner');
+  });
+
+  it('allows it while another owner remains', async () => {
+    const second = await seedOwner('second@example.invalid');
+    const first = (await auth.listUsers()).find((u) => u.role === 'owner' && u.id !== second);
+    await auth.setRole(first!.id, 'analyst', 'actor');
+    expect(roleOf(first!.id)).toBe('analyst');
+    expect(roleOf(second)).toBe('owner');
+  });
+
+  it('never leaves the platform without one, however the demotions are ordered', async () => {
+    const second = await seedOwner('third@example.invalid');
+    const first = (await auth.listUsers()).find((u) => u.role === 'owner' && u.id !== second)!.id;
+
+    // Two demotions of two owners. The check is part of the write, so whichever
+    // lands second sees the first and is refused — leaving the platform
+    // administrable rather than locked out of itself.
+    const results = await Promise.allSettled([
+      auth.setRole(first, 'analyst', 'actor'),
+      auth.setRole(second, 'analyst', 'actor'),
+    ]);
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const owners = (await auth.listUsers()).filter((u) => u.role === 'owner');
+    expect(owners).toHaveLength(1);
+  });
+});

@@ -112,3 +112,44 @@ describe('a job that ignores its abort signal', () => {
     expect(lease?.lock_token).toBeNull();
   });
 });
+
+describe('running a job by hand', () => {
+  it('refuses a job an operator has disabled', async () => {
+    scheduler.registerAll([
+      {
+        name: 'paused',
+        description: 'Switched off deliberately.',
+        intervalSeconds: 3600,
+        hasSideEffects: true,
+        timeoutSeconds: 30,
+        run: async () => ({ itemsProcessed: 1 }),
+      },
+    ]);
+    scheduler.setEnabled('paused', false);
+
+    // Disabling is an operational pause. A manual run that ignores it makes the
+    // pause meaningless — an owner who switched off the launch queue did so to
+    // stop launches happening, by any route.
+    const result = await scheduler.runNow('paused');
+    expect(result.started).toBe(false);
+    expect(result.reason).toMatch(/disabled/i);
+    expect(runOf('paused')).toBeUndefined();
+  });
+
+  it('runs one that is enabled', async () => {
+    scheduler.registerAll([
+      {
+        name: 'live',
+        description: 'Enabled.',
+        intervalSeconds: 3600,
+        hasSideEffects: false,
+        timeoutSeconds: 30,
+        run: async () => ({ itemsProcessed: 1 }),
+      },
+    ]);
+
+    const result = await scheduler.runNow('live');
+    expect(result.started).toBe(true);
+    await waitFor(() => runOf('live')?.status === 'succeeded', 5_000);
+  });
+});

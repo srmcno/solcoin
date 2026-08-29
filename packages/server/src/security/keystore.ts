@@ -217,8 +217,19 @@ export function parseSecretKey(secret: string): Keypair {
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
+/*
+ * Base58, with the leading-zero convention the format actually specifies.
+ *
+ * Each leading '1' encodes exactly one zero byte. Seeding the accumulator with
+ * a zero makes the first leading '1' contribute one from the accumulator and
+ * another from the leading-zero pass, so a key beginning with '1' decodes one
+ * byte too long — a 64-byte secret whose first byte is zero comes out at 65 and
+ * is rejected. That is roughly one in every 256 otherwise valid keys, failing
+ * only for the operator unlucky enough to hold one. The accumulator starts
+ * empty, so the leading-zero pass is the only place zeroes come from.
+ */
 export function decodeBase58(input: string): Uint8Array {
-  const bytes: number[] = [0];
+  const bytes: number[] = [];
   for (const char of input) {
     const value = BASE58_ALPHABET.indexOf(char);
     if (value === -1) throw new Error(`invalid base58 character: ${char}`);
@@ -237,8 +248,9 @@ export function decodeBase58(input: string): Uint8Array {
   return Uint8Array.from(bytes.reverse());
 }
 
+/** The inverse, with the same convention: one '1' per leading zero byte. */
 export function encodeBase58(bytes: Uint8Array): string {
-  const digits: number[] = [0];
+  const digits: number[] = [];
   for (const byte of bytes) {
     let carry = byte;
     for (let i = 0; i < digits.length; i++) {
