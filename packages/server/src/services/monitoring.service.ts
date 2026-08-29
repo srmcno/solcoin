@@ -197,10 +197,24 @@ export class MonitoringService {
     const volume24h = data.volume24hSol ?? Number(existing.volume_24h_sol ?? 0);
     const holders = data.holders ?? previousHolders;
     const hadFirstTrade = existing.first_trade_at !== null && existing.first_trade_at !== undefined;
-    const hasActivity = (data.txCount24h ?? 0) > 0 || volume24h > 0 || holders > 1;
 
-    const firstTradeAt = !hadFirstTrade && hasActivity ? observedAt : (existing.first_trade_at as number | null);
-    const lastTradeAt = hasActivity ? observedAt : (existing.last_trade_at as number | null);
+    /*
+     * Two distinct questions, deliberately not conflated.
+     *
+     * "Has it ever traded?" can be inferred from holders: more than one holder
+     * means somebody bought at some point, even if no volume figure survived.
+     *
+     * "Is it trading now?" cannot. Holders are a stock, not a flow — they
+     * persist long after the last trade. Treating a holder count as current
+     * activity means a token with twenty holders and no volume never goes
+     * quiet, so it never becomes dormant, and the platform keeps polling a dead
+     * token at full rate forever.
+     */
+    const hasEverTraded = (data.txCount24h ?? 0) > 0 || volume24h > 0 || holders > 1;
+    const isTradingNow = (data.txCount24h ?? 0) > 0 || volume24h > 0;
+
+    const firstTradeAt = !hadFirstTrade && hasEverTraded ? observedAt : (existing.first_trade_at as number | null);
+    const lastTradeAt = isTradingNow ? observedAt : (existing.last_trade_at as number | null);
 
     const graduated = data.graduated === true;
     const graduatedAt = graduated ? ((existing.graduated_at as number | null) ?? observedAt) : (existing.graduated_at as number | null);
