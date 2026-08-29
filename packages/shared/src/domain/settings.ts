@@ -103,7 +103,9 @@ export const MonitoringSettings = z.object({
 export type MonitoringSettings = z.infer<typeof MonitoringSettings>;
 
 export const ResearchSettings = z.object({
-  enabledSources: z.array(TrendSourceId).default(['reddit', 'hackernews', 'wikipedia', 'gdelt']),
+  enabledSources: z
+    .array(TrendSourceId)
+    .default(['google_trends', 'bluesky', 'mastodon', 'wikipedia', 'hackernews', 'gdelt']),
   discoveryIntervalMinutes: z.number().int().min(5).default(30),
   /** Maximum trends to keep in the active working set. */
   maxActiveTrends: z.number().int().min(10).default(400),
@@ -113,6 +115,10 @@ export const ResearchSettings = z.object({
   conceptsPerOpportunity: z.number().int().min(1).max(12).default(4),
   /** Additional subreddits / RSS feeds / query terms the operator wants watched. */
   customSubreddits: z.array(z.string()).default([]),
+  /** Additional Mastodon instances to poll, de-biasing any single community. */
+  mastodonInstances: z.array(z.string()).default(['mastodon.social', 'fosstodon.org', 'mstdn.social']),
+  /** Google Trends region codes to sweep. */
+  googleTrendsRegions: z.array(z.string()).default(['US', 'GB', 'CA', 'AU']),
   customRssFeeds: z.array(z.string().url()).default([]),
   customKeywords: z.array(z.string()).default([]),
 });

@@ -32,20 +32,74 @@ export type OperatingPhase = z.infer<typeof OperatingPhase>;
 export const ExecutionNetwork = z.enum(['simulation', 'devnet', 'mainnet']);
 export type ExecutionNetwork = z.infer<typeof ExecutionNetwork>;
 
+/**
+ * Trend data sources.
+ *
+ * The first block is the zero-auth core: every one of these works on a fresh
+ * install with no signup, which is why the platform can discover opportunities
+ * out of the box. The second block needs credentials and is optional.
+ *
+ * Notably absent from the default set: Reddit (unauthenticated JSON endpoints
+ * now return 403 and OAuth access is gated behind an approval process) and
+ * X (no free tier; reads are billed per returned post). Both are supported when
+ * the operator supplies credentials, neither is required.
+ */
 export const TrendSourceId = z.enum([
-  'reddit',
-  'hackernews',
-  'wikipedia',
-  'gdelt',
-  'youtube',
+  // Zero-auth core.
   'google_trends',
-  'x',
+  'bluesky',
+  'mastodon',
+  'wikipedia',
+  'hackernews',
+  'gdelt',
+  'stackexchange',
   'rss',
+  // Credentialed, optional.
+  'youtube',
+  'reddit',
+  'x',
+  // On-chain / market-derived.
   'pumpfun_market',
   'dexscreener',
   'manual',
 ]);
 export type TrendSourceId = z.infer<typeof TrendSourceId>;
+
+/** Sources that work with no API key at all. */
+export const ZERO_AUTH_TREND_SOURCES: TrendSourceId[] = [
+  'google_trends',
+  'bluesky',
+  'mastodon',
+  'wikipedia',
+  'hackernews',
+  'gdelt',
+  'stackexchange',
+  'rss',
+];
+
+/**
+ * Independence weights for cross-platform confirmation.
+ *
+ * Sources measuring the same population should not both count as independent
+ * evidence. Search demand, social conversation, encyclopaedia lookups and news
+ * coverage are genuinely different populations; two Fediverse instances are not.
+ */
+export const SOURCE_INDEPENDENCE: Record<TrendSourceId, { family: string; weight: number }> = {
+  google_trends: { family: 'search', weight: 1.0 },
+  wikipedia: { family: 'reference', weight: 0.95 },
+  gdelt: { family: 'news', weight: 0.9 },
+  bluesky: { family: 'social', weight: 0.85 },
+  mastodon: { family: 'social', weight: 0.6 },
+  x: { family: 'social', weight: 0.9 },
+  reddit: { family: 'forum', weight: 0.85 },
+  hackernews: { family: 'forum', weight: 0.6 },
+  stackexchange: { family: 'forum', weight: 0.4 },
+  youtube: { family: 'video', weight: 0.85 },
+  rss: { family: 'news', weight: 0.5 },
+  pumpfun_market: { family: 'onchain', weight: 0.7 },
+  dexscreener: { family: 'onchain', weight: 0.5 },
+  manual: { family: 'manual', weight: 0.3 },
+};
 
 export const TrendCategory = z.enum([
   'internet_culture',

@@ -47,7 +47,7 @@ export function openDatabase(options: DbOptions): Db {
   // Reclaim space from deleted observations without a full VACUUM.
   sqlite.pragma('auto_vacuum = INCREMENTAL');
 
-  const db = drizzle(sqlite, { schema, logger: options.verbose ?? false }) as Db;
+  const db = drizzle(sqlite, { schema, logger: options.verbose ?? false }) as unknown as Db;
   Object.defineProperty(db, '$raw', { value: sqlite, enumerable: false });
   return db;
 }
