@@ -308,9 +308,8 @@ export class TrendService {
 
       const embedding = row.embedding ? unpackEmbedding(String(row.embedding)) : localEmbed(String(row.title));
       const novelty = noveltyBaseline(trendId, embedding);
-      const saturation = options.saturationByTrendId?.get(trendId) ?? Number(row.saturation_score ?? 0);
-      const memeability =
-        options.memeabilityByTrendId?.get(trendId) ?? Number(row.memeability ?? 0) ?? 0;
+      const saturation = options.saturationByTrendId?.get(trendId) ?? numericColumn(row.saturation_score);
+      const memeability = options.memeabilityByTrendId?.get(trendId) ?? numericColumn(row.memeability);
 
       const scored = scoreOpportunity({
         kinetics,
@@ -566,6 +565,17 @@ export class TrendService {
  * platform", not precise calibrations: 100,000 Bluesky posts and 5,000,000
  * Wikipedia pageviews are both roughly "very large" for their source.
  */
+/**
+ * SQLite hands back whatever was written, so a numeric column can arrive as a
+ * string, as null, or as text that does not parse. `Number(x) ?? 0` does not
+ * catch that last case — NaN is not nullish — and a NaN would propagate
+ * silently into a score. Anything that is not a finite number reads as zero.
+ */
+function numericColumn(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function sourceScaleReference(source: TrendSourceId): number {
   switch (source) {
     case 'google_trends':

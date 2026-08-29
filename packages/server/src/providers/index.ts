@@ -1,4 +1,3 @@
-import { SECRET_KEYS } from '../security/secrets.js';
 import { componentLogger } from '../core/logger.js';
 import { safeErrorText } from '../core/errors.js';
 import { newId } from '../core/ids.js';

@@ -1,4 +1,3 @@
-import { eq, sql } from 'drizzle-orm';
 import { ROLE_PERMISSIONS, roleHasPermission, type Permission, type UserRole } from '@solcoin/shared';
 import { AppError } from '../core/errors.js';
 import { newId, newToken } from '../core/ids.js';

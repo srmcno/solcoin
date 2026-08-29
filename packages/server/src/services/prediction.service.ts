@@ -232,41 +232,6 @@ export class PredictionService {
       .all() as Array<Record<string, unknown>>;
   }
 
-  /**
-   * Explain a prediction in plain language.
-   *
-   * The transparency requirement is not satisfied by dumping coefficients: the
-   * question a person asks is "what made this look good, and how sure are you?"
-   */
-  explain(result: PredictionResult, features: LaunchFeatures): string[] {
-    const lines: string[] = [];
-    lines.push(
-      `Modelled ${(result.probabilities.first_buy * 100).toFixed(0)}% chance of any organic buyer, ${(result.probabilities.ten_holders * 100).toFixed(0)}% of reaching ten holders, and ${(result.probabilities.graduation * 100).toFixed(1)}% of graduating.`,
-    );
-    lines.push(
-      `Expected creator fees ${result.creatorFeesSol.mean.toFixed(4)} SOL (median ${result.creatorFeesSol.median.toFixed(4)}, 10th–90th percentile ${result.creatorFeesSol.p10.toFixed(4)}–${result.creatorFeesSol.p90.toFixed(4)}). The mean sits above the median because outcomes are heavily skewed.`,
-    );
-    lines.push(
-      `Net expected value ${result.expectedValueSol >= 0 ? '+' : ''}${result.expectedValueSol.toFixed(4)} SOL after costs, with a ${(result.probabilityProfitable * 100).toFixed(0)}% chance of being profitable at all.`,
-    );
-    if (result.tailConcentration > 0.4) {
-      lines.push(
-        `${(result.tailConcentration * 100).toFixed(0)}% of the expected value comes from the top 1% of simulated outcomes — this is a lottery ticket, not a reliable earner.`,
-      );
-    }
-    const positive = result.drivers.filter((d) => d.contribution > 0).slice(0, 3);
-    const negative = result.drivers.filter((d) => d.contribution < 0).slice(0, 3);
-    if (positive.length) lines.push(`Strongest positive signals: ${positive.map((d) => humaniseFeature(d.feature)).join(', ')}.`);
-    if (negative.length) lines.push(`Strongest negative signals: ${negative.map((d) => humaniseFeature(d.feature)).join(', ')}.`);
-    lines.push(
-      `Model ${result.modelVersion}, confidence ${(result.confidence * 100).toFixed(0)}%. ${
-        result.confidence < 0.5
-          ? 'Confidence is low because the model has seen few real outcomes; treat these numbers as priors, not measurements.'
-          : ''
-      }`.trim(),
-    );
-    return lines;
-  }
 }
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -296,7 +261,7 @@ const FEATURE_LABELS: Record<string, string> = {
   x_early_x_breadth: 'early and broadly confirmed',
 };
 
-function humaniseFeature(name: string): string {
+export function humaniseFeature(name: string): string {
   if (FEATURE_LABELS[name]) return FEATURE_LABELS[name];
   if (name.startsWith('category#')) return 'category';
   if (name.startsWith('primary_source#')) return 'trend source';

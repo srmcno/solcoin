@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createHash, hkdfSync } from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
 import { createHarness, type TestHarness } from '../helpers.js';
 import { LaunchService } from '../../packages/server/src/services/launch.service.js';
@@ -301,7 +302,6 @@ describe('recovery', () => {
 
 /** Mirrors the adapter's HKDF derivation for the determinism assertion. */
 function deriveDeterministic(key: string): string {
-  const { createHash, hkdfSync } = require('node:crypto') as typeof import('node:crypto');
   const seed = Buffer.from(
     hkdfSync('sha256', Buffer.from('test-secret-key-material', 'utf8'), createHash('sha256').update(key).digest(), Buffer.from('solcoin/mint/v1', 'utf8'), 32),
   );

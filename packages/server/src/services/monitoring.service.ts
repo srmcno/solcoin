@@ -1,4 +1,4 @@
-import { TIME, clamp, gini, lamportsToSol, type TokenLifecycle } from '@solcoin/shared';
+import { TIME, gini, type TokenLifecycle } from '@solcoin/shared';
 import { newId } from '../core/ids.js';
 import { componentLogger } from '../core/logger.js';
 import type { Db } from '../db/client.js';
@@ -163,6 +163,17 @@ export class MonitoringService {
 
     const observedAt = data.observedAt || this.now();
 
+    /*
+     * Not every market provider reports USD. Pump.fun's own API does; the DEX
+     * aggregators sometimes return a SOL price alone. When the poll batch
+     * carried a SOL/USD rate the conversion is arithmetic rather than a guess,
+     * so the USD column stays populated across providers instead of going
+     * null-and-back depending on which one answered first.
+     */
+    const usdRate = Number.isFinite(solPriceUsd) && (solPriceUsd ?? 0) > 0 ? (solPriceUsd as number) : null;
+    const priceUsd =
+      data.priceUsd ?? (usdRate !== null && data.priceSol !== undefined ? data.priceSol * usdRate : null);
+
     this.db.$raw
       .prepare(
         `INSERT INTO market_observations
@@ -178,7 +189,7 @@ export class MonitoringService {
         observedAt,
         data.source,
         data.priceSol ?? null,
-        data.priceUsd ?? null,
+        priceUsd,
         data.marketCapUsd ?? null,
         data.liquidityUsd ?? null,
         data.volume5mSol ?? null,

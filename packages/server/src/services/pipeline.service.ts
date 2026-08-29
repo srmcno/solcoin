@@ -1,8 +1,6 @@
-import { createHash } from 'node:crypto';
 import {
   DEFAULT_ECONOMICS,
   estimateAmmCreatorFeeBps,
-  lamportsToSol,
   type CompetitorToken,
   type EconomicAssumptions,
   type RejectionReason,

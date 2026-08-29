@@ -1,4 +1,3 @@
-import { eq } from 'drizzle-orm';
 import {
   PlatformSettings,
   defaultSettings,
@@ -13,7 +12,7 @@ import { newId } from '../core/ids.js';
 import { componentLogger } from '../core/logger.js';
 import { parseJson } from '../core/json.js';
 import type { Db } from '../db/client.js';
-import { settingHistory, settings } from '../db/schema.js';
+import { settingHistory } from '../db/schema.js';
 import { AUDIT_ACTIONS, type AuditLog } from '../security/audit.js';
 import type { EventBus } from '../core/events.js';
 

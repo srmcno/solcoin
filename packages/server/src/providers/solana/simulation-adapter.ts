@@ -79,7 +79,7 @@ export class SimulationLaunchAdapter implements LaunchAdapter {
     return { ready: true };
   }
 
-  async prepare(request: LaunchRequest, payer: string): Promise<LaunchPlan> {
+  async prepare(request: LaunchRequest, _payer: string): Promise<LaunchPlan> {
     // Derive the same way the real adapter does, so a plan reviewed in
     // simulation has the same shape as one reviewed on mainnet.
     const seedBytes = Buffer.from(
@@ -114,7 +114,7 @@ export class SimulationLaunchAdapter implements LaunchAdapter {
     };
   }
 
-  async execute(plan: LaunchPlan, payer: Keypair): Promise<LaunchReceipt> {
+  async execute(plan: LaunchPlan, _payer: Keypair): Promise<LaunchReceipt> {
     const createdAt = this.now();
     const rng = createRng(hashSeed(`${this.seed}:${plan.mintAddress}`));
 

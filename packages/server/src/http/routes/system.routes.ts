@@ -1,6 +1,5 @@
 import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import { z } from 'zod';
-import { UserRole } from '@solcoin/shared';
 import { AppError } from '../../core/errors.js';
 import { SESSION_COOKIE } from '../../security/auth.js';
 import { actorFrom, requirePermission } from '../server.js';
@@ -81,7 +80,7 @@ export default async function systemRoutes(
   });
 
   app.post('/api/system/emergency-stop', async (request) => {
-    const actor = requirePermission(request, 'emergency_stop');
+    requirePermission(request, 'emergency_stop');
     const { reason } = z.object({ reason: z.string().min(3).max(500) }).parse(request.body);
     container.settings.emergencyStop(reason, actorFrom(request));
     return { ok: true, message: 'Emergency stop engaged. All jobs with side effects are suspended.' };

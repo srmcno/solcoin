@@ -1,4 +1,4 @@
-import { TIME, lamportsToSol, solToLamports } from '@solcoin/shared';
+import { TIME, lamportsToSol } from '@solcoin/shared';
 import { safeErrorText } from '../core/errors.js';
 import { componentLogger } from '../core/logger.js';
 import type { AppContainer } from '../container.js';

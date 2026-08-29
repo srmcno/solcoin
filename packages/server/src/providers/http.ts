@@ -251,6 +251,10 @@ export class HttpClient {
         headers['content-type'] = headers['content-type'] ?? 'application/json';
       }
 
+      // The one sanctioned call site: everything the lint rule asks for — rate
+      // limiting, the circuit breaker, the timeout, URL redaction — is what the
+      // surrounding function adds on top of this call.
+      // eslint-disable-next-line no-restricted-globals
       const response = await fetch(url, { method, headers, body, signal: controller.signal, redirect: 'follow' });
 
       const accepted = options.acceptStatuses ?? [];

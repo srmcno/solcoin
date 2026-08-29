@@ -15,7 +15,6 @@ import {
 import { AppError } from '../core/errors.js';
 import { newId } from '../core/ids.js';
 import { componentLogger } from '../core/logger.js';
-import { parseJson } from '../core/json.js';
 import type { Db } from '../db/client.js';
 import type { EventBus } from '../core/events.js';
 import type { AiRouter } from '../providers/ai/router.js';
@@ -72,6 +71,8 @@ export interface GeneratedConcept {
   blocked: boolean;
   blockReason?: string;
   reasoningSummary: string;
+  /** The model id that actually produced this concept, for later attribution. */
+  generatorModel: string;
   originalityDetail: unknown;
   saturationDetail: unknown;
 }
@@ -326,6 +327,7 @@ export class ConceptService {
       blocked,
       blockReason,
       reasoningSummary,
+      generatorModel,
       originalityDetail: originality,
       saturationDetail: saturation,
     };
@@ -372,7 +374,7 @@ export class ConceptService {
           JSON.stringify(c.saturationDetail),
           JSON.stringify(c.originalityDetail),
           c.reasoningSummary,
-          'generation-tier',
+          c.generatorModel,
           costPerConcept,
           // A concept is tied to a moment. If it has not launched within the
           // trend's remaining attention window it is stale, not merely old.

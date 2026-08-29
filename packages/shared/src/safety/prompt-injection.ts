@@ -81,6 +81,8 @@ export function detectInjection(text: string): InjectionDetection {
 }
 
 /** C0/C1 control characters, excluding tab and newline which carry meaning. */
+// Matching control characters is the purpose of this pattern, not an accident.
+// eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = new RegExp('[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]', 'g');
 
 /**

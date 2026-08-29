@@ -1,7 +1,6 @@
 import { clamp, mean, stddev, type RiskFlag } from '@solcoin/shared';
 import { newId } from '../core/ids.js';
 import { componentLogger } from '../core/logger.js';
-import { parseJson } from '../core/json.js';
 import type { Db } from '../db/client.js';
 import type { AiRouter } from '../providers/ai/router.js';
 import type { ScoredTrend } from './trend.service.js';

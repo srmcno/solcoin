@@ -120,7 +120,7 @@ export class LaunchService {
     // succeeded, or be mid-flight.
     const existing = this.findByIdempotencyKey(idempotencyKey);
     if (existing) {
-      const reconciled = await this.reconcile(existing, options.signal);
+      const reconciled = await this.reconcile(existing);
       if (reconciled) return reconciled;
     }
 
@@ -186,7 +186,7 @@ export class LaunchService {
       // exists — so it is reported as a blocked outcome rather than thrown.
       const conflicting = this.findByIdempotencyKey(idempotencyKey);
       if (conflicting) {
-        const reconciled = await this.reconcile(conflicting, options.signal);
+        const reconciled = await this.reconcile(conflicting);
         if (reconciled) return reconciled;
         return {
           launchId: String(conflicting.id),
@@ -354,7 +354,7 @@ export class LaunchService {
    * when the caller should proceed with a fresh attempt (only possible when the
    * previous attempt definitively failed before broadcasting).
    */
-  private async reconcile(row: Record<string, unknown>, signal?: AbortSignal): Promise<LaunchOutcome | null> {
+  private async reconcile(row: Record<string, unknown>): Promise<LaunchOutcome | null> {
     const status = String(row.status);
     const launchId = String(row.id);
     const network = String(row.network) as ExecutionNetwork;

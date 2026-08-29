@@ -114,7 +114,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
     'GET:/api/health',
   ]);
 
-  app.addHook('preHandler', async (request, reply) => {
+  app.addHook('preHandler', async (request) => {
     if (!request.url.startsWith('/api/')) return;
 
     const routeKey = `${request.method}:${request.routeOptions?.url ?? request.url.split('?')[0]}`;

@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
-import { z } from 'zod';
 import { lamportsToSol } from '@solcoin/shared';
 import { AppError } from '../../core/errors.js';
 import { requirePermission } from '../server.js';
