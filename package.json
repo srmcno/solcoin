@@ -1,0 +1,30 @@
+{
+  "name": "solcoin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous AI token launch, research, monitoring and creator-fee platform for Solana / Pump.fun",
+  "engines": { "node": ">=20.11" },
+  "workspaces": ["packages/shared", "packages/server", "packages/web"],
+  "scripts": {
+    "build": "npm run build -w @solcoin/shared && npm run build -w @solcoin/server && npm run build -w @solcoin/web",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @solcoin/server\" \"npm run dev -w @solcoin/web\"",
+    "start": "node packages/server/dist/main.js",
+    "db:migrate": "npm run db:migrate -w @solcoin/server",
+    "db:generate": "npm run db:generate -w @solcoin/server",
+    "typecheck": "tsc -b packages/shared packages/server packages/web",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint packages --ext .ts,.tsx --max-warnings 0",
+    "format": "prettier --write \"packages/**/*.{ts,tsx,json,css,md}\"",
+    "doctor": "node packages/server/dist/cli/doctor.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.2",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
