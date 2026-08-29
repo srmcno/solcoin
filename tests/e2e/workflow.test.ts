@@ -484,3 +484,76 @@ describe('access control', () => {
     expect(unknown.json().error.message).toBe(wrong.json().error.message);
   });
 });
+
+describe('a candidate is never left unreachable', () => {
+  /**
+   * Two ways a candidate could enter a state nothing can act on: expiring in
+   * the window between the hourly sweep and a two-minute launch queue, and
+   * being left in `launching` when launch setup throws before submitting
+   * anything. Either strands it — invisible to the queue, to stale expiry, and
+   * to every launchable status in the dashboard.
+   */
+  function seedApproved(id: string, expiresAt: number | null): void {
+    const at = container.clock.now();
+    container.db.$raw
+      .prepare(
+        `INSERT INTO concepts (id, name, symbol, description, status, metadata_uri, expires_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(id, 'Expiry Test', 'EXPT', 'a candidate used in an expiry test', 'approved', 'https://example.invalid/m.json', expiresAt, at, at);
+  }
+
+  function statusOf(id: string): string {
+    const row = container.db.$raw.prepare('SELECT status FROM concepts WHERE id = ?').get(id) as { status: string };
+    return row.status;
+  }
+
+  it('refuses to launch a candidate whose evaluation has expired', async () => {
+    seedApproved('cpt_expired', container.clock.now() - 60_000);
+
+    const outcome = await container.launchApproved('cpt_expired', { actorId: 'tester' });
+
+    // A trend is only worth a token while it is still moving. Launching an
+    // expired one spends real SOL on a moment that has passed.
+    expect(outcome.status).toBe('blocked');
+    expect(outcome.error).toMatch(/expired/i);
+    expect(statusOf('cpt_expired')).toBe('expired');
+
+    const launches = container.db.$raw
+      .prepare('SELECT COUNT(*) AS n FROM launches WHERE concept_id = ?')
+      .get('cpt_expired') as { n: number };
+    expect(launches.n).toBe(0);
+  });
+
+  it('still launches one that has not expired', async () => {
+    seedApproved('cpt_fresh', container.clock.now() + 3_600_000);
+    const outcome = await container.launchApproved('cpt_fresh', { actorId: 'tester' });
+    expect(outcome.status).toBe('confirmed');
+    expect(statusOf('cpt_fresh')).toBe('launched');
+  });
+
+  it('leaves a candidate actionable when launch setup fails before submitting', async () => {
+    seedApproved('cpt_setup_fail', null);
+
+    // Headroom, so the pre-flight guard is not what stops this: the point is
+    // the throw that happens after the concept is already marked `launching`.
+    container.settings.update({ limits: { maxLaunchesPerHour: 20, maxLaunchesPerDay: 20 } }, { type: 'system' });
+
+    // No adapter for the network is exactly the shape of a misconfiguration or
+    // a provider that has not come back yet.
+    const adapters = container.adapters;
+    const simulation = adapters.get('simulation');
+    adapters.delete('simulation');
+    try {
+      await expect(container.launchApproved('cpt_setup_fail', { actorId: 'tester' })).rejects.toThrow(
+        /adapter is not registered|No launch adapter/i,
+      );
+    } finally {
+      if (simulation) adapters.set('simulation', simulation);
+    }
+
+    // `launching` would strand it: no queue picks it up, no sweep expires it,
+    // and the dashboard offers no action on it.
+    expect(statusOf('cpt_setup_fail')).toBe('approved');
+  });
+});

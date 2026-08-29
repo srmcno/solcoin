@@ -213,3 +213,59 @@ describe('stranded rent arithmetic', () => {
     expect(lamportsToSol(CURVE_VAULT_RENT_LAMPORTS)).toBeCloseTo(0.00089088, 8);
   });
 });
+
+describe('what a claim costs', () => {
+  const withSigner = async <T>(fn: (kp: Keypair) => Promise<T>): Promise<T> =>
+    fn(Keypair.fromSeed(new Uint8Array(32).fill(11)));
+
+  function committedSpendLamports(): number {
+    const row = harness.db.$raw
+      .prepare(
+        `SELECT COALESCE(SUM(lamports + fee_lamports), 0) AS total
+           FROM wallet_transactions WHERE direction = 'out' AND status IN ('pending','confirmed')`,
+      )
+      .get() as { total: number };
+    return row.total;
+  }
+
+  beforeEach(() => {
+    harness.settings.update({ autonomy: { fee_collection: 'approve' } }, { type: 'system' });
+    // The simulated vaults are filled by simulated trading; seeding them
+    // directly is the only way to reach the claim path deterministically.
+    (adapter as unknown as { vaults: Map<string, { curve: number; amm: number }> }).vaults.set(CREATOR, {
+      curve: solToLamports(0.5),
+      amm: 0,
+    });
+  });
+
+  it('records the network fee as committed spend', async () => {
+    expect(committedSpendLamports()).toBe(0);
+    const result = await service.collect(adapter, CREATOR, withSigner, { actorType: 'user' });
+    expect(result.collected).toBe(true);
+    // The claim is revenue-positive, but the signature fee is still real SOL
+    // leaving the wallet. Recorded nowhere the guard could see it, a claim loop
+    // against a failing RPC would spend outside every limit the operator set.
+    expect(committedSpendLamports()).toBeGreaterThan(0);
+  });
+
+  it('is refused when the spending limits leave no room', async () => {
+    // "Spend nothing" has to mean nothing, including network fees.
+    harness.settings.update(
+      { limits: { maxSolSpendPerDay: 0, maxSolPerHour: 0, maxSolPerTransaction: 0 } },
+      { type: 'system' },
+    );
+    const result = await service.collect(adapter, CREATOR, withSigner, { actorType: 'user' });
+    expect(result.collected).toBe(false);
+    // Named explicitly so this cannot pass because there was nothing to claim.
+    expect(result.reason).toMatch(/limit/i);
+    expect(committedSpendLamports()).toBe(0);
+  });
+
+  it('is not blocked by the wallet balance floor', async () => {
+    // The floor exists precisely so there is always enough SOL left to collect
+    // what has already been earned. Applying it here would defeat its purpose.
+    harness.settings.update({ limits: { walletBalanceFloorSol: 1000 } }, { type: 'system' });
+    const result = await service.collect(adapter, CREATOR, withSigner, { actorType: 'user' });
+    expect(result.collected).toBe(true);
+  });
+});

@@ -306,6 +306,64 @@ export class FeeService {
       return { collected: false, lamports: 0, reason: 'Nothing to claim.' };
     }
 
+    /*
+     * A claim is revenue-positive — `decideCollection` has already refused any
+     * that would cost more than it recovers — but it still spends SOL on
+     * network fees, and that spend used to happen outside every limit and be
+     * recorded nowhere the guard could see. An operator who sets the hourly cap
+     * to zero means "spend nothing", and a claim loop against a failing RPC
+     * burns a signature fee per attempt with nothing to show for it.
+     *
+     * So the estimated fee is reserved against the caps before the claim, and
+     * the reservation lands in `wallet_transactions` — the same ledger
+     * `spentLamportsSince` already reads — so the next caller sees it. It is
+     * reconciled to the fee actually paid once the claim returns.
+     *
+     * The wallet balance is deliberately not passed: the balance floor exists
+     * so there is always enough SOL left to collect the fees already earned, so
+     * blocking a claim on it would defeat its purpose. The per-transaction,
+     * hourly and daily caps still apply.
+     */
+    const estimatedFeeLamports = estimateClaimCostLamports({
+      includeCurve: plan.includesCurve,
+      includeAmm: plan.includesAmm,
+    });
+    const reservationId = newId('wtx', this.now());
+    const reservation = this.guard.reserveSpend({ operation: 'fee_collection', lamports: estimatedFeeLamports }, () => {
+      this.db.$raw
+        .prepare(
+          `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports, fee_lamports,
+                                            counterparty, status, occurred_at, created_at)
+           VALUES (?,?,?,?,?,0,?,?,?,?,?)`,
+        )
+        .run(
+          reservationId,
+          creator,
+          this.settings.get().execution.network,
+          'out',
+          'fee_claim',
+          estimatedFeeLamports,
+          creator,
+          'pending',
+          this.now(),
+          this.now(),
+        );
+    });
+    if (reservation.outcome !== 'reserved') {
+      const reason =
+        reservation.outcome === 'denied'
+          ? (reservation.decision.reason ?? 'Spending limits do not permit a fee claim right now.')
+          : 'Another fee claim is already in progress.';
+      return { collected: false, lamports: 0, reason };
+    }
+
+    /** Bring the reservation into line with what the claim actually cost. */
+    const reconcile = (feeLamports: number, status: 'confirmed' | 'failed', signature?: string): void => {
+      this.db.$raw
+        .prepare('UPDATE wallet_transactions SET fee_lamports = ?, status = ?, signature = ? WHERE id = ?')
+        .run(feeLamports, status, signature ?? null, reservationId);
+    };
+
     try {
       const result = await getSigner((payer) => adapter.executeFeeClaim(plan, payer, { signal: options.signal }));
 
@@ -352,12 +410,18 @@ export class FeeService {
       });
       this.events.emit('fees.collected', { mint: creator, lamports: result.claimedLamports, signature: result.signature });
 
+      reconcile(result.networkFeeLamports, 'confirmed', result.signature);
+
       this.log.info(
         { creator, sol: lamportsToSol(result.claimedLamports), signature: result.signature },
         'creator fees collected',
       );
       return { collected: true, lamports: result.claimedLamports, signature: result.signature };
     } catch (e) {
+      // A claim that never landed still paid nothing, but one that failed after
+      // broadcast may have. The estimate is the honest figure to keep until
+      // something better is known, so only the status changes.
+      reconcile(estimatedFeeLamports, 'failed');
       const message = safeErrorText(e, 400);
       this.audit.record({
         actorType: options.actorType ?? 'job',

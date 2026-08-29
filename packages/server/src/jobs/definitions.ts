@@ -147,13 +147,18 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
         const settings = container.settings.get();
         // Approval-mode candidates wait for a human. This job only picks up what
         // is already approved, so it is safe at any autonomy level.
+        // Expiry is swept hourly by the maintenance job while this runs every
+        // two minutes, so an expired concept is filtered here rather than
+        // waiting for the sweep. `launchApproved` re-checks immediately before
+        // claiming, which is what actually closes the window.
         const approved = container.db.$raw
           .prepare(
             `SELECT id, name, symbol FROM concepts
               WHERE status = 'approved' AND metadata_uri IS NOT NULL
+                AND (expires_at IS NULL OR expires_at > ?)
               ORDER BY approved_at ASC, created_at ASC LIMIT 5`,
           )
-          .all() as Array<{ id: string; name: string; symbol: string }>;
+          .all(container.clock.now()) as Array<{ id: string; name: string; symbol: string }>;
 
         if (approved.length === 0) return { itemsProcessed: 0 };
 

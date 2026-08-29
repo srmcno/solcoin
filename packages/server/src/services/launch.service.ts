@@ -467,8 +467,9 @@ export class LaunchService {
     }
 
     if (status === 'failed' || status === 'abandoned') {
-      // Deliberately do not auto-retry: the failure reason may still hold, and
-      // a caller who wants a retry must clear the record explicitly.
+      // Deliberately do not auto-retry: the failure reason may still hold. A
+      // person who has looked at it and wants another attempt goes through
+      // `retireFailed`, which the manual launch path calls for them.
       return {
         launchId,
         status: 'failed',
@@ -494,6 +495,34 @@ export class LaunchService {
          WHERE id = ?`,
       )
       .run(message, code, JSON.stringify(log.slice(-20)), this.now(), launchId);
+  }
+
+  /**
+   * Free a failed launch so the same concept can be attempted again.
+   *
+   * The idempotency key is what stops a retry becoming a second token, and it
+   * stays claimed by the failed row forever — so without this, "retry" on a
+   * failed candidate could never submit anything, however many times it was
+   * pressed. The row is kept and reclassified rather than deleted: the history
+   * and the failure analytics stay intact, and only the key is retired.
+   *
+   * Deliberately not called on the autonomous path. A launch that failed may
+   * fail the same way again, and the platform retrying by itself is how a bad
+   * configuration turns into a run of paid-for failures.
+   */
+  retireFailed(conceptId: string, network: ExecutionNetwork): number {
+    const key = LaunchService.idempotencyKey(conceptId, network);
+    const retired = this.db.$raw
+      .prepare(
+        `UPDATE launches
+            SET status = 'abandoned', idempotency_key = 'retired:' || id, updated_at = ?
+          WHERE idempotency_key = ? AND status IN ('failed','abandoned')`,
+      )
+      .run(this.now(), key).changes;
+    if (retired > 0) {
+      this.log.info({ conceptId, network, retired }, 'retired a failed launch so the concept can be attempted again');
+    }
+    return retired;
   }
 
   findByIdempotencyKey(key: string): Record<string, unknown> | null {

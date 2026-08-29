@@ -261,6 +261,7 @@ export const AUDIT_ACTIONS = {
   feeCollected: 'fees.collected',
   feeCollectionSkipped: 'fees.collection_skipped',
   emergencyStop: 'system.emergency_stop',
+  launchFailuresCleared: 'system.launch_failures_cleared',
   emergencyRelease: 'system.emergency_release',
   autonomyChanged: 'system.autonomy_changed',
   phaseChanged: 'system.phase_changed',

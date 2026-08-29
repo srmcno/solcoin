@@ -220,7 +220,9 @@ export class GuardService {
       return {
         allowed: false,
         code: 'consecutive_failures',
-        reason: `${consecutiveFailures} consecutive launch failures. Launching is halted until the cause is resolved and the counter is cleared.`,
+        reason:
+          `${consecutiveFailures} consecutive launch failures on ${network}. Launching is halted until the cause ` +
+          'is resolved and the failures are acknowledged (POST /api/system/clear-launch-failures).',
       };
     }
 
@@ -288,7 +290,16 @@ export class GuardService {
     return row?.n ?? 0;
   }
 
-  /** Failures since the most recent success, on the active network. */
+  /**
+   * Failures since the most recent success, on the active network.
+   *
+   * Only `confirmed` and `failed` count. An `abandoned` launch is one an
+   * operator has acknowledged through `clearLaunchFailures`, and it drops out
+   * of this window entirely — which is what lets the breaker be reset at all.
+   * Without that the breaker is a trap: once it trips, every launch is refused
+   * before it can produce the success that would clear the count, so three
+   * transient RPC failures disable launching permanently.
+   */
   consecutiveLaunchFailures(): number {
     const network = this.settings.get().execution.network;
     const rows = this.db.$raw
@@ -304,6 +315,42 @@ export class GuardService {
       else break;
     }
     return count;
+  }
+
+  /**
+   * Acknowledge the failures holding the breaker down.
+   *
+   * The operator is asserting they have looked at the cause. The rows are
+   * reclassified rather than deleted, so the history and the analytics — which
+   * count `failed` and `abandoned` alike — stay honest about what happened;
+   * only the breaker stops counting them. Their idempotency keys are retired
+   * so the affected concepts can be launched again.
+   */
+  clearLaunchFailures(actor: { actorId?: string; actorLabel?: string }, reason?: string): number {
+    const network = this.settings.get().execution.network;
+    const cleared = this.db.$raw
+      .prepare(
+        `UPDATE launches
+            SET status = 'abandoned',
+                idempotency_key = 'retired:' || id,
+                updated_at = ?
+          WHERE network = ? AND status = 'failed'`,
+      )
+      .run(this.now(), network).changes;
+
+    this.audit.record({
+      actorType: actor.actorId ? 'user' : 'system',
+      actorId: actor.actorId ?? null,
+      actorLabel: actor.actorLabel ?? null,
+      action: AUDIT_ACTIONS.launchFailuresCleared,
+      targetType: 'system',
+      targetId: network,
+      reason: reason ?? null,
+      parameters: { network, cleared },
+    });
+
+    this.log.warn({ network, cleared }, 'launch failure counter cleared by an operator');
+    return cleared;
   }
 
   /** Current usage against every limit, for the dashboard. */

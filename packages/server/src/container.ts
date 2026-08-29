@@ -5,7 +5,7 @@ import { openDatabase, type Db } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
 import { EventBus } from './core/events.js';
 import { componentLogger } from './core/logger.js';
-import { AppError, safeErrorText } from './core/errors.js';
+import { AppError, errorCode, safeErrorText } from './core/errors.js';
 import { systemClock, type Clock } from './core/clock.js';
 import { AuditLog } from './security/audit.js';
 import { AuthService } from './security/auth.js';
@@ -507,24 +507,78 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
         );
       }
 
+      /*
+       * A candidate whose evaluation has expired must not be launched.
+       *
+       * Expiry is applied by the maintenance job, which runs hourly, while the
+       * launch queue runs every two minutes — so for up to an hour a concept
+       * can be `approved` and expired at the same time. Checking here rather
+       * than relying on the sweep is what stops a stale concept going to
+       * mainnet with real funds in that window.
+       */
+      const expiresAt = concept.expires_at === null || concept.expires_at === undefined ? null : Number(concept.expires_at);
+      if (expiresAt !== null && expiresAt <= now()) {
+        concepts.setStatus(conceptId, 'expired', {
+          reason: 'expired',
+          detail: 'The concept expired before it was launched. A trend is only worth a token while it is still moving.',
+        });
+        return {
+          launchId: '',
+          status: 'blocked',
+          network,
+          error: 'This candidate expired before it could be launched. Regenerate from the trend if it is still moving.',
+          errorCode: 'conflict',
+          simulated: network === 'simulation',
+        };
+      }
+
+      /*
+       * A person retrying a candidate that failed is asking for another
+       * attempt, and the failed row still holds the idempotency key that would
+       * make one impossible. Retiring it here is what makes the retry the
+       * dashboard offers actually do something. Only on the manual path: the
+       * scheduler retrying by itself is how one bad configuration becomes a run
+       * of paid-for failures.
+       */
+      if (actor.actorId && String(concept.status) === 'failed') {
+        launches.retireFailed(conceptId, network);
+      }
+
       concepts.setStatus(conceptId, 'launching');
 
-      const outcome = await launches.launch(
-        {
-          conceptId,
-          predictionId,
-          name: String(concept.name),
-          symbol: String(concept.symbol),
-          description: String(concept.description ?? ''),
-          metadataUri: String(concept.metadata_uri ?? ''),
-          imageUri: (concept.image_uri as string) ?? undefined,
-          approvalMode: actor.actorId ? 'manual' : 'autonomous',
-          initiatedBy: actor.actorId,
-          actorLabel: actor.actorLabel,
-        },
-        wallet.signerFor(network),
-        { walletBalanceLamports: balance },
-      );
+      /*
+       * `launch()` can throw before it submits anything — no adapter for the
+       * network, an adapter that reports itself unready. The status restore
+       * below only runs when it *returns*, so a throw used to strand the
+       * concept in `launching`: excluded from the launch queue, from stale
+       * expiry, and from every launchable status in the UI. A transient
+       * provider problem should not cost a candidate permanently.
+       */
+      let outcome: LaunchOutcome;
+      try {
+        outcome = await launches.launch(
+          {
+            conceptId,
+            predictionId,
+            name: String(concept.name),
+            symbol: String(concept.symbol),
+            description: String(concept.description ?? ''),
+            metadataUri: String(concept.metadata_uri ?? ''),
+            imageUri: (concept.image_uri as string) ?? undefined,
+            approvalMode: actor.actorId ? 'manual' : 'autonomous',
+            initiatedBy: actor.actorId,
+            actorLabel: actor.actorLabel,
+          },
+          wallet.signerFor(network),
+          { walletBalanceLamports: balance },
+        );
+      } catch (e) {
+        concepts.setStatus(conceptId, 'approved', {
+          reason: errorCode(e),
+          detail: `Launch setup failed before anything was submitted: ${safeErrorText(e, 200)}`,
+        });
+        throw e;
+      }
 
       if (outcome.status === 'confirmed' && outcome.mintAddress) {
         await finaliseConfirmedLaunch({

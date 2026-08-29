@@ -780,7 +780,13 @@ minutes old: the mint account existing is the definitive answer, a signature
 status carrying `err` means expired, and anything still ambiguous after 10
 minutes is treated as expired. Rows in `failed` or
 `abandoned` are deliberately not auto-retried either — the failure reason may
-still hold, and a caller who wants a retry must clear the record explicitly.
+still hold, and the scheduler retrying by itself is how one bad configuration
+becomes a run of paid-for failures. A person asking for another attempt is a
+different matter: the manual launch path calls `LaunchService.retireFailed`
+first, which reclassifies the failed row and retires the idempotency key that
+would otherwise make the retry impossible. Without that the dashboard's retry
+on a failed candidate could never submit anything, however many times it was
+pressed.
 
 Beyond these three, `LaunchService` engages the emergency stop automatically once
 consecutive launch failures reach `limits.consecutiveFailureShutdown`, because

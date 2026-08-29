@@ -93,6 +93,29 @@ export default async function systemRoutes(
     return { ok: true, message: 'Emergency stop released.' };
   });
 
+  /**
+   * Acknowledge the launch failures holding the consecutive-failure breaker
+   * down. Without this the breaker cannot be reset from outside the database:
+   * every launch is refused before it can produce the success that would clear
+   * the count.
+   */
+  app.post('/api/system/clear-launch-failures', async (request) => {
+    const actor = requirePermission(request, 'emergency_stop');
+    const { reason } = z.object({ reason: z.string().min(3).max(500) }).parse(request.body);
+    const cleared = container.guard.clearLaunchFailures(
+      { actorId: actor.id, actorLabel: actor.displayName },
+      reason,
+    );
+    return {
+      ok: true,
+      cleared,
+      message:
+        cleared === 0
+          ? 'There were no failed launches to acknowledge on this network.'
+          : `Acknowledged ${cleared} failed launch${cleared === 1 ? '' : 'es'}. Launching can resume once the emergency stop is released.`,
+    };
+  });
+
   app.get('/api/system/providers', async (request) => {
     requirePermission(request, 'view');
     return { providers: await container.health.checkAll() };

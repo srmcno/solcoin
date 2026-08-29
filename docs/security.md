@@ -1030,6 +1030,14 @@ matters most is precisely the one where the process keeps dying and coming back.
 Note that spend counts `preparing` and `pending` rows too, not only confirmed
 ones. Money that is committed but not yet settled still counts against the limit.
 
+A creator-fee claim writes its network fee into `wallet_transactions` with
+`purpose = 'fee_claim'` for exactly this reason. The claim recovers more than it
+costs — that is checked before it runs — but the signature fee is still SOL
+leaving the wallet, and a claim loop against a failing RPC would otherwise spend
+outside every limit the operator set while being recorded nowhere the guard
+could see it. The row is written as the reservation that approves the claim and
+reconciled to the fee actually paid.
+
 ### The universal precondition
 
 `checkOperational` runs before every operation with side effects, **including the
@@ -1087,6 +1095,16 @@ continuing to burn rent on transactions that will not land.
 Operators can engage and release the stop manually through
 `POST /api/system/emergency-stop` and `/emergency-release`, both requiring the
 `emergency_stop` permission and a reason of 3–500 characters.
+
+Releasing the stop is not enough on its own after a failure shutdown, because
+the breaker counts failed launches rather than reading a flag. Nothing clears
+that count by itself: while it is engaged every launch is refused before it can
+produce the success that would reset it. `POST /api/system/clear-launch-failures`
+(same permission, same reason requirement) is the acknowledgement — it
+reclassifies the failed launches on the active network as `abandoned`, which
+keeps them in the history and in the failure analytics while taking them out of
+the breaker's window, and retires their idempotency keys so those concepts can
+be launched again.
 
 Current usage against the rate and spend limits — launches this hour and today,
 SOL this hour and today, AI dollars today, and the consecutive-failure count —
