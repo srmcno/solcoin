@@ -86,7 +86,10 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
                 null,
                 token.createdAtMs ?? container.clock.now(),
                 token.marketCapUsd ?? null,
-                token.volume24hSol ?? null,
+                // The column is USD, and so is the threshold the saturation
+                // scorer compares it against. Writing the SOL figure here was
+                // the same unit error the live search path carried.
+                token.volume24hUsd ?? null,
                 token.liquidityUsd ?? null,
                 token.holders ?? null,
                 token.graduated ? 1 : 0,
@@ -156,7 +159,7 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
 
         // The guard is checked once up front so a blocked state does not produce
         // one failure log per queued candidate.
-        const permitted = await container.guard.checkLaunch();
+        const permitted = container.guard.checkLaunch();
         if (!permitted.allowed) {
           return { itemsProcessed: 0, result: { skipped: approved.length, reason: permitted.reason } };
         }

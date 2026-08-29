@@ -234,3 +234,74 @@ describe('events', () => {
     expect(seen).toHaveLength(1);
   });
 });
+
+describe('cumulative volume', () => {
+  /**
+   * Providers report a rolling 24-hour window. A lifetime total has to be
+   * integrated from those windows; recording the largest one ever seen is the
+   * peak day, which `peak_volume_24h_sol` already answers, and the analytics
+   * sum this column as total organic volume.
+   */
+  function totals(mint: string): { total: number; peak: number } {
+    const row = harness.db.$raw
+      .prepare('SELECT volume_total_sol, peak_volume_24h_sol FROM tokens WHERE mint = ?')
+      .get(mint) as { volume_total_sol: number; peak_volume_24h_sol: number };
+    return { total: row.volume_total_sol, peak: row.peak_volume_24h_sol };
+  }
+
+  it('counts the whole window on the first observation', () => {
+    register('mint_vol_first');
+    observe('mint_vol_first', { volume24hSol: 40, holders: 12, txCount24h: 90 });
+    expect(totals('mint_vol_first').total).toBeCloseTo(40, 6);
+  });
+
+  it('accumulates across days rather than keeping the best one', () => {
+    register('mint_vol_days');
+    // Three days at a steady 40 SOL/day is 120 SOL of trading, not 40.
+    observe('mint_vol_days', { volume24hSol: 40, holders: 12, txCount24h: 90 });
+    harness.clock.advance(24 * HOUR);
+    observe('mint_vol_days', { volume24hSol: 40, holders: 20, txCount24h: 180 });
+    harness.clock.advance(24 * HOUR);
+    observe('mint_vol_days', { volume24hSol: 40, holders: 26, txCount24h: 240 });
+
+    const { total, peak } = totals('mint_vol_days');
+    expect(total).toBeCloseTo(120, 4);
+    // The best single day is a separate question and still answered.
+    expect(peak).toBeCloseTo(40, 6);
+  });
+
+  it('does not double-count overlapping windows when polling is frequent', () => {
+    register('mint_vol_overlap');
+    observe('mint_vol_overlap', { volume24hSol: 24, holders: 9, txCount24h: 50 });
+    // Six more polls an hour apart, each still reporting the same 24h window.
+    for (let i = 0; i < 6; i++) {
+      harness.clock.advance(1 * HOUR);
+      observe('mint_vol_overlap', { volume24hSol: 24, holders: 9, txCount24h: 50 });
+    }
+    // The first window plus six hours of it: 24 + 6 × (24/24) = 30.
+    expect(totals('mint_vol_overlap').total).toBeCloseTo(30, 4);
+  });
+
+  it('does not lose elapsed time to an observation that carries no volume', () => {
+    register('mint_vol_gap');
+    observe('mint_vol_gap', { volume24hSol: 24, holders: 5, txCount24h: 30 });
+    harness.clock.advance(6 * HOUR);
+    // A provider that answered without a volume figure must not advance the
+    // accounting marker, or those six hours would be silently dropped.
+    observe('mint_vol_gap', { holders: 6 });
+    harness.clock.advance(6 * HOUR);
+    observe('mint_vol_gap', { volume24hSol: 24, holders: 7, txCount24h: 60 });
+
+    // 24 for the first window, then twelve hours of it: 24 + 12 = 36.
+    expect(totals('mint_vol_gap').total).toBeCloseTo(36, 4);
+  });
+
+  it('never counts more than the window actually reported', () => {
+    register('mint_vol_cap');
+    observe('mint_vol_cap', { volume24hSol: 10, holders: 4, txCount24h: 20 });
+    harness.clock.advance(10 * 24 * HOUR);
+    // Ten days later the window still only evidences 10 SOL of trading, not 100.
+    observe('mint_vol_cap', { volume24hSol: 10, holders: 4, txCount24h: 20 });
+    expect(totals('mint_vol_cap').total).toBeCloseTo(20, 4);
+  });
+});

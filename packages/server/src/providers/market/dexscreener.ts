@@ -633,6 +633,7 @@ function aggregate(
     ...optional('volume5mSol', toSol(volume5mUsd)),
     ...optional('volume1hSol', toSol(volume1hUsd)),
     ...optional('volume24hSol', toSol(volume24hUsd)),
+    ...optional('volume24hUsd', volume24hUsd),
     ...optional('txCount24h', txns24h ? txns24h.buys + txns24h.sells : undefined),
     ...optional('buys24h', txns24h?.buys),
     ...optional('sells24h', txns24h?.sells),

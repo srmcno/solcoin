@@ -63,6 +63,12 @@ export class AuthService {
     displayName: string;
     role: UserRole;
     actorId?: string;
+    /**
+     * Bootstrap only: refuse unless the account being created is the first one
+     * to exist. The check belongs inside the insert transaction, not at the
+     * route, because hashing happens in between.
+     */
+    requireFirstUser?: boolean;
   }): Promise<AuthenticatedUser> {
     const email = input.email.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
@@ -76,12 +82,39 @@ export class AuthService {
     const record = await hashPassword(input.password);
     const id = newId('usr', this.now());
 
-    this.db.$raw
-      .prepare(
-        `INSERT INTO users (id, email, display_name, role, password_hash, password_params, active, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,1,?,?)`,
-      )
-      .run(id, email, input.displayName.trim().slice(0, 120), input.role, record.hash, record.params, this.now(), this.now());
+    /*
+     * Re-check and insert in one synchronous transaction.
+     *
+     * Password hashing is deliberately slow, and it sits between the checks
+     * above and this insert. Two bootstrap requests with different email
+     * addresses would both find no user, both spend a second hashing, and both
+     * insert an owner — the email uniqueness constraint cannot catch that,
+     * because the addresses differ. better-sqlite3 transactions contain no
+     * `await`, so nothing can interleave with the re-check here.
+     */
+    const claim = this.db.$raw.transaction(() => {
+      if (input.requireFirstUser) {
+        const { n } = this.db.$raw.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
+        if (n > 0) return false;
+      }
+      if (this.db.$raw.prepare('SELECT id FROM users WHERE email = ?').get(email)) return false;
+      this.db.$raw
+        .prepare(
+          `INSERT INTO users (id, email, display_name, role, password_hash, password_params, active, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,1,?,?)`,
+        )
+        .run(id, email, input.displayName.trim().slice(0, 120), input.role, record.hash, record.params, this.now(), this.now());
+      return true;
+    });
+
+    if (!claim()) {
+      throw new AppError(
+        'conflict',
+        input.requireFirstUser
+          ? 'The platform was set up by another request while this one was in progress. Sign in instead.'
+          : 'An account with that email already exists.',
+      );
+    }
 
     this.audit.record({
       actorType: input.actorId ? 'user' : 'system',
@@ -256,13 +289,31 @@ export class AuthService {
     }
   }
 
-  async revokeAllSessions(userId: string): Promise<number> {
+  /**
+   * Revoke this user's sessions.
+   *
+   * `exceptToken` keeps one alive — the session performing the revocation.
+   * Signing out the caller as well leaves them holding a cookie that stops
+   * working on their next request, with nothing having said so.
+   */
+  async revokeAllSessions(userId: string, exceptToken?: string): Promise<number> {
+    if (exceptToken) {
+      return this.db.$raw
+        .prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND token_hash != ?')
+        .run(this.now(), userId, sha256(exceptToken)).changes;
+    }
     return this.db.$raw
       .prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL')
       .run(this.now(), userId).changes;
   }
 
-  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    /** The session making the request, so it survives the revocation. */
+    currentToken?: string,
+  ): Promise<void> {
     const row = this.db.$raw.prepare('SELECT password_hash, password_params FROM users WHERE id = ?').get(userId) as
       | { password_hash: string; password_params: string }
       | undefined;
@@ -279,7 +330,10 @@ export class AuthService {
 
     // Changing a password invalidates every other session: if the change was
     // prompted by a suspected compromise, leaving old sessions live defeats it.
-    await this.revokeAllSessions(userId);
+    // The session that made the change is kept — it just proved it knows the
+    // current password, and signing it out silently is what the endpoint's own
+    // message says does not happen.
+    await this.revokeAllSessions(userId, currentToken);
   }
 
   async setRole(userId: string, role: UserRole, actorId: string): Promise<void> {

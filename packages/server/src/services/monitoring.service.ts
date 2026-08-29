@@ -203,6 +203,35 @@ export class MonitoringService {
         this.now(),
       );
 
+    /*
+     * `volume24hSol` is a rolling window, not a lifetime figure. Recording the
+     * largest window ever seen is the peak day, which `peak_volume_24h_sol`
+     * already answers — and the analytics sum this column as total organic
+     * volume, so anything that traded across more than one day was understated.
+     *
+     * What can be derived honestly is an integral of the rate: treat the window
+     * as `volume24h` per 24 hours and add only the share of it that has elapsed
+     * since the observation this total was last advanced to. A token polled
+     * every ten minutes and one polled every six hours then accumulate
+     * comparably, and neither double-counts an overlap. On the first
+     * observation the whole window counts, which is correct for a token that
+     * is younger than the window and the best available estimate otherwise.
+     *
+     * It is an estimate. Irregular polling makes it a rough one, and no
+     * provider reports a true lifetime total to check it against.
+     */
+    const VOLUME_WINDOW_MS = 24 * 3_600_000;
+    const accountedAt = existing.volume_accounted_at === null || existing.volume_accounted_at === undefined
+      ? null
+      : Number(existing.volume_accounted_at);
+    let volumeAdded = 0;
+    let volumeAccountedAt: number | null = null;
+    if (data.volume24hSol !== undefined && Number.isFinite(data.volume24hSol)) {
+      const elapsed = accountedAt === null ? VOLUME_WINDOW_MS : Math.max(0, observedAt - accountedAt);
+      volumeAdded = data.volume24hSol * (Math.min(elapsed, VOLUME_WINDOW_MS) / VOLUME_WINDOW_MS);
+      volumeAccountedAt = observedAt;
+    }
+
     const previousLifecycle = String(existing.lifecycle) as TokenLifecycle;
     const previousHolders = Number(existing.holders ?? 0);
     const volume24h = data.volume24hSol ?? Number(existing.volume_24h_sol ?? 0);
@@ -253,7 +282,8 @@ export class MonitoringService {
            price_sol = COALESCE(?, price_sol), liquidity_usd = COALESCE(?, liquidity_usd),
            volume_1h_sol = COALESCE(?, volume_1h_sol), volume_24h_sol = ?,
            peak_volume_24h_sol = MAX(peak_volume_24h_sol, ?),
-           volume_total_sol = MAX(volume_total_sol, ?),
+           volume_total_sol = volume_total_sol + ?,
+           volume_accounted_at = COALESCE(?, volume_accounted_at),
            tx_count = MAX(tx_count, COALESCE(?, 0)), buy_count = MAX(buy_count, COALESCE(?, 0)),
            sell_count = MAX(sell_count, COALESCE(?, 0)),
            first_trade_at = COALESCE(first_trade_at, ?), last_trade_at = COALESCE(?, last_trade_at),
@@ -275,7 +305,8 @@ export class MonitoringService {
         data.volume1hSol ?? null,
         volume24h,
         volume24h,
-        Math.max(Number(existing.volume_total_sol ?? 0), volume24h),
+        volumeAdded,
+        volumeAccountedAt,
         data.txCount24h ?? null,
         data.buys24h ?? null,
         data.sells24h ?? null,

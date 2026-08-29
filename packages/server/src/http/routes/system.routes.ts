@@ -41,7 +41,7 @@ export default async function systemRoutes(
       throw new AppError('conflict', 'The platform has already been set up. Sign in instead.');
     }
     const body = BootstrapBody.parse(request.body);
-    const user = await container.auth.createUser({ ...body, role: 'owner' });
+    const user = await container.auth.createUser({ ...body, role: 'owner', requireFirstUser: true });
     const session = await container.auth.login({
       email: body.email,
       password: body.password,

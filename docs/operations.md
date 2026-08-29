@@ -506,7 +506,7 @@ two fields behave very differently and the difference matters:
 > branch calls `wallet.transfer({ purpose: 'treasury_sweep' })`.** The scheduler
 > suspends jobs by that flag, so this one keeps running during an emergency stop
 > and still attempts the transfer. No SOL moves, though: `wallet.transfer()` goes
-> through `guard.requireSpend({ operation: 'wallet_transfer' })`, and
+> through `guard.reserveSpend({ operation: 'wallet_transfer' }, …)`, and
 > `checkOperational` denies every `wallet_transfer` while the stop is engaged (and
 > whenever `autonomy.wallet_transfer` is `off`). The visible symptom of a stop
 > during a due sweep is a warn line, `automatic treasury sweep failed`, not a

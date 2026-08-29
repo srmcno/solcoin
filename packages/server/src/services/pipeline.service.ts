@@ -454,7 +454,11 @@ export class PipelineService {
               symbol: token.symbol ?? '',
               createdAtMs: token.createdAtMs ?? this.now(),
               marketCapUsd: token.marketCapUsd,
-              volume24hUsd: token.volume24hSol,
+              // Saturation weighs volume against USD thresholds. Assigning the
+              // SOL figure here made a competitor doing real money look like
+              // one doing a few hundred dollars, so crowded concepts cleared a
+              // gate that exists to stop them. Unknown stays unknown.
+              volume24hUsd: token.volume24hUsd,
               holders: token.holders,
               graduated: token.graduated,
             });

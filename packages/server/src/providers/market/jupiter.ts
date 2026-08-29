@@ -660,6 +660,7 @@ function toTokenMarketData(
     ...optional('volume5mSol', toSol(stats['5m']?.totalVolumeUsd)),
     ...optional('volume1hSol', toSol(stats['1h']?.totalVolumeUsd)),
     ...optional('volume24hSol', toSol(day?.totalVolumeUsd)),
+    ...optional('volume24hUsd', day?.totalVolumeUsd),
     ...optional(
       'txCount24h',
       numBuys !== undefined || numSells !== undefined ? (numBuys ?? 0) + (numSells ?? 0) : undefined,

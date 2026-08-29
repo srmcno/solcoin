@@ -524,7 +524,18 @@ export const tokens = sqliteTable(
     liquidityUsd: real('liquidity_usd').notNull().default(0),
     volume1hSol: real('volume_1h_sol').notNull().default(0),
     volume24hSol: real('volume_24h_sol').notNull().default(0),
+    /*
+     * Cumulative traded volume, integrated from the rolling 24-hour windows the
+     * market providers report. Each observation contributes the share of its
+     * window that has elapsed since the last one accounted for, so a token
+     * polled often and one polled rarely accumulate comparably and neither
+     * double-counts an overlap. It is an estimate, not a measured lifetime
+     * total — no provider reports one — and irregular polling makes it a rough
+     * one. `peakVolume24hSol` is the separate question of the best single day.
+     */
     volumeTotalSol: real('volume_total_sol').notNull().default(0),
+    /** Observation time the running total above has been advanced to. */
+    volumeAccountedAt: integer('volume_accounted_at'),
     peakVolume24hSol: real('peak_volume_24h_sol').notNull().default(0),
     txCount: integer('tx_count').notNull().default(0),
     buyCount: integer('buy_count').notNull().default(0),

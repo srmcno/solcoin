@@ -305,11 +305,6 @@ export class WalletService {
     }
 
     const balance = await this.rpc.getBalance(source ?? destination);
-    await this.guard.requireSpend({
-      operation: 'wallet_transfer',
-      lamports: input.lamports,
-      walletBalanceLamports: balance,
-    });
 
     const idempotencyKey =
       input.idempotencyKey ??
@@ -326,26 +321,41 @@ export class WalletService {
     }
 
     const txId = newId('wtx', this.now());
-    this.db.$raw
-      .prepare(
-        `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports,
-                                          counterparty, status, idempotency_key, initiated_by, occurred_at, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        txId,
-        source ?? '',
-        network,
-        'out',
-        input.purpose,
-        input.lamports,
-        destination.toBase58(),
-        'pending',
-        idempotencyKey,
-        input.actorId ?? null,
-        this.now(),
-        this.now(),
-      );
+
+    /*
+     * The spend limits are evaluated in the same transaction that writes the
+     * `pending` row consuming them. Checking first and inserting afterwards
+     * leaves an `await` in between, and two transfers to different
+     * destinations arriving in that window both read the same committed spend,
+     * both clear the caps, and both land — for a combined amount the caps were
+     * supposed to forbid. Everything slow is already done above.
+     */
+    const reservation = this.guard.reserveSpend(
+      { operation: 'wallet_transfer', lamports: input.lamports, walletBalanceLamports: balance },
+      () => {
+        this.db.$raw
+          .prepare(
+            `INSERT INTO wallet_transactions (id, wallet_address, network, direction, purpose, lamports,
+                                              counterparty, status, idempotency_key, initiated_by, occurred_at, created_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(
+            txId,
+            source ?? '',
+            network,
+            'out',
+            input.purpose,
+            input.lamports,
+            destination.toBase58(),
+            'pending',
+            idempotencyKey,
+            input.actorId ?? null,
+            this.now(),
+            this.now(),
+          );
+      },
+    );
+    if (reservation.outcome === 'denied') throw this.guard.denial(reservation.decision);
 
     try {
       const result = await this.keystore.withSigner(async (payer) => {

@@ -50,6 +50,18 @@ export interface SpendRequest {
 
 const ALLOWED: GuardDecision = { allowed: true };
 
+/**
+ * The outcome of an atomic reservation.
+ *
+ * `abandoned` is distinct from `denied` on purpose: a caller that finds its
+ * work already claimed by a concurrent attempt has not hit a limit, and
+ * reporting one would be misleading. Nothing is consumed in either case.
+ */
+export type GuardReservation<T> =
+  | { outcome: 'reserved'; value: T }
+  | { outcome: 'denied'; decision: GuardDecision }
+  | { outcome: 'abandoned' };
+
 export class GuardService {
   private readonly log = componentLogger('guard');
 
@@ -88,8 +100,14 @@ export class GuardService {
     return ALLOWED;
   }
 
-  /** Full pre-flight for a spending operation. */
-  async checkSpend(request: SpendRequest): Promise<GuardDecision> {
+  /**
+   * Full pre-flight for a spending operation.
+   *
+   * Synchronous on purpose. Every counter is a database read, and keeping the
+   * whole evaluation free of `await` is what lets `reserveSpend` run it inside
+   * a transaction that nothing else can interleave with.
+   */
+  checkSpend(request: SpendRequest): GuardDecision {
     const operational = this.checkOperational(request.operation);
     if (!operational.allowed) return operational;
 
@@ -106,7 +124,7 @@ export class GuardService {
         };
       }
 
-      const hourly = await this.spentLamportsSince(this.now() - TIME.hour);
+      const hourly = this.spentLamportsSince(this.now() - TIME.hour);
       const hourlyCap = solToLamports(config.limits.maxSolPerHour);
       if (hourly + lamports > hourlyCap) {
         return {
@@ -117,7 +135,7 @@ export class GuardService {
         };
       }
 
-      const daily = await this.spentLamportsSince(this.now() - TIME.day);
+      const daily = this.spentLamportsSince(this.now() - TIME.day);
       const dailyCap = solToLamports(config.limits.maxSolSpendPerDay);
       if (daily + lamports > dailyCap) {
         return {
@@ -143,7 +161,7 @@ export class GuardService {
     }
 
     if (request.usd !== undefined && request.usd > 0) {
-      const spent = await this.aiSpendUsdSince(this.now() - TIME.day);
+      const spent = this.aiSpendUsdSince(this.now() - TIME.day);
       if (spent + request.usd > config.limits.maxAiSpendUsdPerDay) {
         return {
           allowed: false,
@@ -165,10 +183,10 @@ export class GuardService {
    * expired dependency, a protocol change — and continuing to retry burns rent
    * and fees on transactions that will not land.
    */
-  async checkLaunch(walletBalanceLamports?: number): Promise<GuardDecision> {
+  checkLaunch(walletBalanceLamports?: number): GuardDecision {
     const config = this.settings.get();
 
-    const base = await this.checkSpend({
+    const base = this.checkSpend({
       operation: 'launch',
       lamports: solToLamports(config.execution.devBuySol) + 6_000_000,
       walletBalanceLamports,
@@ -177,7 +195,7 @@ export class GuardService {
 
     const network = config.execution.network;
 
-    const lastHour = await this.countLaunchesSince(this.now() - TIME.hour, network);
+    const lastHour = this.countLaunchesSince(this.now() - TIME.hour, network);
     if (lastHour >= config.limits.maxLaunchesPerHour) {
       return {
         allowed: false,
@@ -187,7 +205,7 @@ export class GuardService {
       };
     }
 
-    const lastDay = await this.countLaunchesSince(this.now() - TIME.day, network);
+    const lastDay = this.countLaunchesSince(this.now() - TIME.day, network);
     if (lastDay >= config.limits.maxLaunchesPerDay) {
       return {
         allowed: false,
@@ -197,7 +215,7 @@ export class GuardService {
       };
     }
 
-    const consecutiveFailures = await this.consecutiveLaunchFailures();
+    const consecutiveFailures = this.consecutiveLaunchFailures();
     if (consecutiveFailures >= config.limits.consecutiveFailureShutdown) {
       return {
         allowed: false,
@@ -233,7 +251,7 @@ export class GuardService {
   }
 
   /** Committed spend in a window: launches plus outgoing wallet transactions. */
-  private async spentLamportsSince(sinceMs: number): Promise<number> {
+  private spentLamportsSince(sinceMs: number): number {
     const launchRow = this.db.$raw
       .prepare(
         `SELECT COALESCE(SUM(total_cost_lamports), 0) AS total
@@ -253,14 +271,14 @@ export class GuardService {
     return (launchRow?.total ?? 0) + (transferRow?.total ?? 0);
   }
 
-  private async aiSpendUsdSince(sinceMs: number): Promise<number> {
+  private aiSpendUsdSince(sinceMs: number): number {
     const row = this.db.$raw
       .prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM ai_requests WHERE created_at >= ?')
       .get(sinceMs) as { total: number };
     return row?.total ?? 0;
   }
 
-  private async countLaunchesSince(sinceMs: number, network: string): Promise<number> {
+  private countLaunchesSince(sinceMs: number, network: string): number {
     const row = this.db.$raw
       .prepare(
         `SELECT COUNT(*) AS n FROM launches
@@ -271,7 +289,7 @@ export class GuardService {
   }
 
   /** Failures since the most recent success, on the active network. */
-  async consecutiveLaunchFailures(): Promise<number> {
+  consecutiveLaunchFailures(): number {
     const network = this.settings.get().execution.network;
     const rows = this.db.$raw
       .prepare(
@@ -309,14 +327,12 @@ export class GuardService {
   }> {
     const config = this.settings.get();
     const network = config.execution.network;
-    const [launchesLastHour, launchesToday, hourLamports, dayLamports, aiToday, failures] = await Promise.all([
-      this.countLaunchesSince(this.now() - TIME.hour, network),
-      this.countLaunchesSince(this.now() - TIME.day, network),
-      this.spentLamportsSince(this.now() - TIME.hour),
-      this.spentLamportsSince(this.now() - TIME.day),
-      this.aiSpendUsdSince(this.now() - TIME.day),
-      this.consecutiveLaunchFailures(),
-    ]);
+    const launchesLastHour = this.countLaunchesSince(this.now() - TIME.hour, network);
+    const launchesToday = this.countLaunchesSince(this.now() - TIME.day, network);
+    const hourLamports = this.spentLamportsSince(this.now() - TIME.hour);
+    const dayLamports = this.spentLamportsSince(this.now() - TIME.day);
+    const aiToday = this.aiSpendUsdSince(this.now() - TIME.day);
+    const failures = this.consecutiveLaunchFailures();
 
     return {
       launchesLastHour,
@@ -338,15 +354,70 @@ export class GuardService {
     };
   }
 
-  /** Throw when denied, for call sites where a denial is exceptional. */
-  async requireSpend(request: SpendRequest): Promise<void> {
-    const decision = await this.checkSpend(request);
-    if (!decision.allowed) {
-      throw new AppError(decision.code === 'emergency_stop' ? 'emergency_stop' : 'limit_exceeded', decision.reason ?? 'Operation not permitted.', {
-        details: { code: decision.code, retryAfterMs: decision.retryAfterMs },
-      });
-    }
+  /**
+   * The error a denial raises, so every throwing call site reports it alike.
+   *
+   * There is deliberately no `requireSpend` that checks and returns. A caller
+   * that is about to spend must reserve, because a decision taken outside the
+   * transaction that records it does not bind — see `reserveSpend`.
+   */
+  denial(decision: GuardDecision): AppError {
+    return new AppError(
+      decision.code === 'emergency_stop' ? 'emergency_stop' : 'limit_exceeded',
+      decision.reason ?? 'Operation not permitted.',
+      { details: { code: decision.code, retryAfterMs: decision.retryAfterMs } },
+    );
   }
+
+  /**
+   * Decide, and write the row that consumes the allowance, atomically.
+   *
+   * A check on its own cannot hold anyone to a limit. Every counter here is
+   * derived from the database, so between reading the committed spend and the
+   * caller inserting the row that records the new spend there is an `await` —
+   * and a second request arriving in that window reads the same totals and
+   * clears the same cap. Both then spend, and their sum exceeds the limit that
+   * was meant to bind them. The same is true of the launch counters.
+   *
+   * better-sqlite3 is synchronous, so a transaction whose body contains no
+   * `await` cannot be interleaved by the event loop: the decision and the
+   * reservation commit together or not at all. That is what makes the limit
+   * real rather than advisory. Everything slow — fetching a balance, checking
+   * an adapter — must therefore happen before the call, not inside `write`.
+   */
+  reserveSpend<T>(request: SpendRequest, write: () => T, options: ReserveOptions = {}): GuardReservation<T> {
+    return this.reserve(() => this.checkSpend(request), write, options);
+  }
+
+  /** The same reservation, against the launch gate rather than a bare spend. */
+  reserveLaunch<T>(
+    walletBalanceLamports: number | undefined,
+    write: () => T,
+    options: ReserveOptions = {},
+  ): GuardReservation<T> {
+    return this.reserve(() => this.checkLaunch(walletBalanceLamports), write, options);
+  }
+
+  private reserve<T>(evaluate: () => GuardDecision, write: () => T, options: ReserveOptions): GuardReservation<T> {
+    const run = this.db.$raw.transaction(() => {
+      // Before the limits, because a duplicate of work already claimed is not
+      // a limit being reached and must not be reported as one.
+      if (options.alreadyClaimed?.()) return { outcome: 'abandoned' as const };
+      const decision = evaluate();
+      if (!decision.allowed) return { outcome: 'denied' as const, decision };
+      return { outcome: 'reserved' as const, value: write() };
+    });
+    return run() as GuardReservation<T>;
+  }
+}
+
+export interface ReserveOptions {
+  /**
+   * Checked first, inside the transaction. Returning true abandons the
+   * reservation without consuming anything: the caller has found that a
+   * concurrent attempt already claimed this work.
+   */
+  alreadyClaimed?: () => boolean;
 }
 
 const OPERATION_TO_CAPABILITY: Partial<Record<GuardOperation, 'launch' | 'fee_collection' | 'wallet_transfer' | 'research' | 'concept_generation'>> = {

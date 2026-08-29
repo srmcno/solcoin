@@ -269,8 +269,13 @@ suspects a compromise, sign-out must be immediate and total. A stateless token
 cannot be revoked without maintaining exactly the server-side state a JWT is
 chosen to avoid — at which point you have a session table with extra
 cryptography bolted on. `revokeAllSessions(userId)` is one `UPDATE`.
-`changePassword` calls it unconditionally, because leaving old sessions live
-after a password change prompted by a suspected compromise defeats the change.
+`changePassword` calls it, because leaving old sessions live after a password
+change prompted by a suspected compromise defeats the change — passing the
+token of the session making the request, which is kept. That session has just
+proved it knows the current password; revoking it too would leave the operator
+holding a cookie that stops working on their next request, with the endpoint's
+own reply saying only *other* sessions were signed out. A reset performed on
+someone else's behalf passes no token and revokes everything.
 
 Only `sha256(token)` is stored. A leaked database yields no live sessions.
 
@@ -1037,6 +1042,24 @@ paused. It denies when:
 
 Denials are fail-closed by construction: an error reading a limit denies the
 operation rather than allowing it.
+
+#### Reservations
+
+The evaluation is synchronous, and that is load-bearing rather than incidental.
+Every counter is a database read, and every caller does asynchronous work — a
+balance fetch, an adapter probe — before it writes the row that records what it
+just claimed. A decision taken before that `await` binds nobody: a second
+request arriving inside the window reads the same totals, clears the same cap,
+and both spend. `reserveSpend` and `reserveLaunch` therefore take the decision
+and write the reservation inside one better-sqlite3 transaction, whose body
+contains no `await` and so cannot be interleaved by the event loop. Anything
+slow has to happen before the call, not inside it.
+
+A reservation has three outcomes, not two: `reserved`, `denied`, and
+`abandoned`. The third is for a caller that finds its work already claimed by a
+concurrent attempt — a duplicate launch of one concept, say. That is not a
+limit being reached, and reporting one would send an operator looking for a
+capacity problem that does not exist.
 
 ### The launch gate
 

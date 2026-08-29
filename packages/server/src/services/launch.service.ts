@@ -9,7 +9,7 @@ import type { Db } from '../db/client.js';
 import type { EventBus } from '../core/events.js';
 import { AUDIT_ACTIONS, type AuditLog } from '../security/audit.js';
 import type { LaunchAdapter, LaunchRequest } from '../providers/solana/launch-adapter.js';
-import type { GuardService } from './guard.service.js';
+import type { GuardDecision, GuardReservation, GuardService } from './guard.service.js';
 import type { SettingsService } from './settings.service.js';
 
 /**
@@ -124,8 +124,7 @@ export class LaunchService {
       if (reconciled) return reconciled;
     }
 
-    const guardDecision = await this.guard.checkLaunch(options.walletBalanceLamports);
-    if (!guardDecision.allowed) {
+    const recordBlocked = (decision: GuardDecision): LaunchOutcome => {
       this.audit.record({
         actorType: input.approvalMode === 'autonomous' ? 'system' : 'user',
         actorId: input.initiatedBy ?? null,
@@ -134,18 +133,24 @@ export class LaunchService {
         targetType: 'concept',
         targetId: input.conceptId,
         result: 'blocked',
-        reason: guardDecision.reason,
-        parameters: { code: guardDecision.code, network },
+        reason: decision.reason,
+        parameters: { code: decision.code, network },
       });
       return {
         launchId: '',
         status: 'blocked',
         network,
-        error: guardDecision.reason,
-        errorCode: guardDecision.code,
+        error: decision.reason,
+        errorCode: decision.code,
         simulated: network === 'simulation',
       };
-    }
+    };
+
+    // A cheap early rejection so an obviously blocked launch does not pay for
+    // an adapter readiness probe. It is not the decision that binds: that one
+    // is made below, inside the transaction that claims the slot.
+    const preflight = this.guard.checkLaunch(options.walletBalanceLamports);
+    if (!preflight.allowed) return recordBlocked(preflight);
 
     const adapter = this.adapterFor(network);
     const readiness = await adapter.ready();
@@ -157,29 +162,51 @@ export class LaunchService {
 
     const launchId = newId('lch', this.now());
 
-    // Claim the idempotency key before any side effect. A unique-constraint
-    // violation here means another attempt got there first, which is a success
-    // condition for correctness, not an error.
+    /*
+     * Claim the idempotency key before any side effect, and re-evaluate the
+     * launch gate in the same transaction that claims it.
+     *
+     * The pre-flight above cannot bind on its own: the launch counters are
+     * read from the database, and between that read and this insert there is
+     * an `await` on the adapter readiness probe. Two launches of different
+     * concepts arriving in that window would both see the same counts, both
+     * clear the hourly and daily limits, and both proceed. Deciding inside the
+     * transaction that writes the `preparing` row closes it.
+     *
+     * A unique-constraint violation here means another attempt got there
+     * first, which is a success condition for correctness, not an error.
+     */
+    let reservation: GuardReservation<void>;
     try {
-      this.db.$raw
-        .prepare(
-          `INSERT INTO launches (id, concept_id, prediction_id, idempotency_key, network, adapter, status,
-                                 approval_mode, initiated_by, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(
-          launchId,
-          input.conceptId,
-          input.predictionId ?? null,
-          idempotencyKey,
-          network,
-          adapter.id,
-          'preparing',
-          input.approvalMode,
-          input.initiatedBy ?? null,
-          this.now(),
-          this.now(),
-        );
+      reservation = this.guard.reserveLaunch(
+        options.walletBalanceLamports,
+        () => {
+          this.db.$raw
+            .prepare(
+              `INSERT INTO launches (id, concept_id, prediction_id, idempotency_key, network, adapter, status,
+                                     approval_mode, initiated_by, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            )
+            .run(
+              launchId,
+              input.conceptId,
+              input.predictionId ?? null,
+              idempotencyKey,
+              network,
+              adapter.id,
+              'preparing',
+              input.approvalMode,
+              input.initiatedBy ?? null,
+              this.now(),
+              this.now(),
+            );
+        },
+        // Checked inside the same transaction, ahead of the limits: a second
+        // attempt at a launch that is already claimed is a duplicate, not a
+        // platform that has run out of hourly slots, and saying the latter
+        // would send an operator looking for the wrong problem.
+        { alreadyClaimed: () => this.findByIdempotencyKey(idempotencyKey) !== null },
+      );
     } catch (e) {
       // A unique-constraint violation here means a concurrent attempt claimed
       // the key first. For correctness that is a success — exactly one launch
@@ -203,6 +230,24 @@ export class LaunchService {
         status: 'blocked',
         network,
         error: 'Could not claim the launch idempotency key.',
+        errorCode: 'conflict',
+        simulated: network === 'simulation',
+      };
+    }
+
+    // Resolved inside the transaction, so nothing was written either way.
+    if (reservation.outcome === 'denied') return recordBlocked(reservation.decision);
+    if (reservation.outcome === 'abandoned') {
+      const conflicting = this.findByIdempotencyKey(idempotencyKey);
+      if (conflicting) {
+        const reconciled = await this.reconcile(conflicting);
+        if (reconciled) return reconciled;
+      }
+      return {
+        launchId: conflicting ? String(conflicting.id) : '',
+        status: 'blocked',
+        network,
+        error: 'Another launch attempt for this concept is already in progress on this network.',
         errorCode: 'conflict',
         simulated: network === 'simulation',
       };
@@ -335,7 +380,7 @@ export class LaunchService {
 
       // Repeated failures usually mean something systemic. Stopping is cheaper
       // than continuing to burn rent on transactions that will not land.
-      const consecutive = await this.guard.consecutiveLaunchFailures();
+      const consecutive = this.guard.consecutiveLaunchFailures();
       const threshold = this.settings.get().limits.consecutiveFailureShutdown;
       if (consecutive >= threshold) {
         this.guard.autoStop(

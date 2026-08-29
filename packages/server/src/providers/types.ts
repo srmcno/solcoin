@@ -98,6 +98,13 @@ export interface TokenMarketData {
   volume5mSol?: number;
   volume1hSol?: number;
   volume24hSol?: number;
+  /**
+   * The same 24-hour volume in USD. Aggregators report volume in USD and it is
+   * converted to SOL for display; saturation scoring compares against USD
+   * thresholds, so the unconverted figure is carried rather than reconstructed
+   * from a SOL price that may not be the one the conversion used.
+   */
+  volume24hUsd?: number;
   txCount24h?: number;
   buys24h?: number;
   sells24h?: number;

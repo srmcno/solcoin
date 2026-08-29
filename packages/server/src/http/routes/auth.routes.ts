@@ -64,7 +64,12 @@ export default async function authRoutes(
   app.post('/api/auth/change-password', async (request) => {
     if (!request.user) throw new AppError('unauthorized', 'Sign in to continue.');
     const body = ChangePasswordBody.parse(request.body);
-    await container.auth.changePassword(request.user.id, body.currentPassword, body.newPassword);
+    await container.auth.changePassword(
+      request.user.id,
+      body.currentPassword,
+      body.newPassword,
+      request.cookies[SESSION_COOKIE],
+    );
     return { ok: true, message: 'Password changed. All other sessions have been signed out.' };
   });
 

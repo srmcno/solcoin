@@ -870,7 +870,7 @@ One flag in that table is wrong and should be treated as a known defect rather
 than a design decision: **`wallet-reconcile` is marked `hasSideEffects: false`
 but can broadcast a treasury sweep** when `wallet.autoSweepEnabled` and
 `autonomy.wallet_transfer === 'auto'`. In practice the transfer is still blocked,
-because `WalletService.transfer` calls `guard.requireSpend()` and
+because `WalletService.transfer` reserves through `guard.reserveSpend()` and
 `GuardService.checkOperational` refuses everything while the stop is engaged —
 so defence in depth catches it. The flag should nonetheless be `true`.
 

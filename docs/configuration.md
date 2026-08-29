@@ -346,7 +346,10 @@ the audit log instead.
 
 The safety envelope. Every side-effecting operation consults `GuardService`
 first, and all counters are derived from the database rather than held in
-memory, so a crash loop cannot reset a daily limit.
+memory, so a crash loop cannot reset a daily limit. Spending operations go
+further and take the decision inside the same transaction that writes the row
+consuming it, so two concurrent requests cannot both clear a cap their sum
+exceeds — see *Reservations* in `docs/security.md`.
 
 | Field | Default | Range | Effect |
 |---|---|---|---|
