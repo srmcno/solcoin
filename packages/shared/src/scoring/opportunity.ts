@@ -50,6 +50,11 @@ export interface OpportunityWeights {
   bias: number;
   /** Exponent on the (1 - saturation) multiplier. Higher = harsher. */
   saturationExponent: number;
+  /**
+   * Floor of the growth-evidence multiplier. A trend with no evidence of rising
+   * attention retains this fraction of its score; the rest must be earned.
+   */
+  evidenceFloor: number;
 }
 
 export const DEFAULT_OPPORTUNITY_WEIGHTS: OpportunityWeights = {
@@ -65,6 +70,7 @@ export const DEFAULT_OPPORTUNITY_WEIGHTS: OpportunityWeights = {
   runway: 0.6,
   bias: -2.6,
   saturationExponent: 1.6,
+  evidenceFloor: 0.3,
 };
 
 export interface OpportunityComponents {
@@ -83,10 +89,12 @@ export interface OpportunityComponents {
 export interface OpportunityScore {
   /** 0..100 headline score. */
   score: number;
-  /** Raw pre-saturation score, 0..100. */
+  /** Raw score before the saturation and evidence multipliers, 0..100. */
   rawScore: number;
   /** Multiplier applied for saturation, 0..1. */
   saturationMultiplier: number;
+  /** Multiplier applied for strength of growth evidence, 0..1. */
+  evidenceMultiplier: number;
   components: OpportunityComponents;
   /** Per-component contribution to the logit, for explanation. */
   contributions: Array<{ component: string; value: number; weight: number; contribution: number }>;
@@ -95,16 +103,28 @@ export interface OpportunityScore {
   rationale: string[];
 }
 
+/**
+ * Credit given to the growth components when the rate cannot yet be measured.
+ *
+ * Deliberately low rather than neutral. A trend observed once has no measurable
+ * growth, and "we cannot tell whether this is rising" is a reason to rank it
+ * *below* a trend we have watched climb — not to award it the score an average
+ * riser would get. Scoring the unknown as average is how a system ends up
+ * spending money on trends it has seen exactly once.
+ */
+const UNMEASURED_RATE_CREDIT = 0.12;
+
 export function computeOpportunityComponents(input: OpportunityInputs): OpportunityComponents {
   const k = input.kinetics;
+  const measured = k.rateEstimable;
 
-  // Velocity: fractional growth per hour. 0.10/h (≈ +170%/day) is a strong wave.
-  const velocity = clamp(logistic((k.relativeVelocity - 0.02) / 0.045), 0, 1);
+  // Velocity: fractional growth per hour. 0.10/h (roughly +170%/day) is a strong wave.
+  const velocity = measured ? clamp(logistic((k.relativeVelocity - 0.02) / 0.045), 0, 1) : UNMEASURED_RATE_CREDIT;
 
   // Acceleration: still speeding up is worth a lot; decelerating is a warning.
-  const acceleration = clamp(logistic(k.acceleration / 0.02), 0, 1);
+  const acceleration = measured ? clamp(logistic(k.acceleration / 0.02), 0, 1) : UNMEASURED_RATE_CREDIT;
 
-  const consistency = clamp(k.consistency, 0, 1);
+  const consistency = measured ? clamp(k.consistency, 0, 1) : UNMEASURED_RATE_CREDIT;
 
   // Breadth: cross-platform confirmation is the strongest anti-noise signal we
   // have. One platform can be a bot cluster; four platforms is a real trend.
@@ -153,12 +173,37 @@ export function scoreOpportunity(
   });
 
   const rawScore = clamp(logistic(logit) * 100, 0, 100);
+
   const saturationMultiplier = clamp(
     Math.pow(1 - clamp(input.saturation, 0, 1), Math.max(0.1, weights.saturationExponent)),
     0,
     1,
   );
-  const score = clamp(rawScore * saturationMultiplier, 0, 100);
+
+  /*
+   * Two multiplicative gates, one per half of the platform's thesis.
+   *
+   * The thesis is "rising attention that nobody has tokenised yet". Saturation
+   * gates the second half. Growth evidence gates the first, and it has to be a
+   * multiplier rather than another additive term: audience size, novelty and
+   * earliness are all high for *every* freshly discovered item, so as additive
+   * terms they sum to a large constant that carries the score regardless of
+   * whether the trend is actually going anywhere. Gating on evidence means a
+   * large but static topic cannot outrank a smaller one that is demonstrably
+   * climbing, which is the entire point.
+   */
+  const evidence = clamp(
+    0.55 * components.velocity + 0.25 * components.acceleration + 0.2 * components.consistency,
+    0,
+    1,
+  );
+  const evidenceMultiplier = clamp(
+    weights.evidenceFloor + (1 - weights.evidenceFloor) * evidence,
+    0,
+    1,
+  );
+
+  const score = clamp(rawScore * saturationMultiplier * evidenceMultiplier, 0, 100);
 
   const rationale: string[] = [];
   const sortedContribs = [...contributions].sort((a, b) => b.contribution - a.contribution);
@@ -173,9 +218,31 @@ export function scoreOpportunity(
       ).toFixed(0)}%.`,
     );
   }
-  rationale.push(`Trend phase: ${input.phase}, age ${input.ageHours.toFixed(1)}h, est. ${input.remainingLifespanHours.toFixed(0)}h remaining.`);
+  if (!input.kinetics.rateEstimable) {
+    rationale.push(
+      `Growth rate is not yet measurable: ${input.kinetics.n} observation${input.kinetics.n === 1 ? '' : 's'} spanning ${input.kinetics.spanHours.toFixed(2)}h. The score is held down until the trend has been watched long enough to tell whether it is actually rising.`,
+    );
+  }
+  rationale.push(
+    `Trend phase: ${input.phase}, age ${input.ageHours.toFixed(1)}h, est. ${input.remainingLifespanHours.toFixed(0)}h remaining.`,
+  );
 
-  return { score, rawScore, saturationMultiplier, components, contributions, phase: input.phase, rationale };
+  if (evidenceMultiplier < 0.7) {
+    rationale.push(
+      `Growth evidence is weak, cutting the score by ${((1 - evidenceMultiplier) * 100).toFixed(0)}%. Attention has to be measurably rising, not merely large.`,
+    );
+  }
+
+  return {
+    score,
+    rawScore,
+    saturationMultiplier,
+    evidenceMultiplier,
+    components,
+    contributions,
+    phase: input.phase,
+    rationale,
+  };
 }
 
 function describeComponent(name: string, value: number): string {

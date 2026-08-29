@@ -46,6 +46,7 @@ interface ScoredTrend {
   lastSeenAt: number;
   sources?: string[];
   keywords?: string[];
+  scoreBreakdown?: unknown;
   aiSummary: string | null;
   injectionFlagged: boolean;
 }
@@ -99,6 +100,49 @@ const SORTS: Array<{ id: SortKey; label: string }> = [
 
 /** Cross-source confirmation below this is a single unverified population. */
 const MIN_SOURCES = 2;
+
+/**
+ * What the API can tell us about whether a row's numbers mean anything.
+ *
+ * `scoreBreakdown` is typed `unknown` and is null until a scoring pass has run,
+ * so nothing here trusts its shape. Two flags matter for honesty:
+ *
+ * - `scored`: a trend that has been ingested but never scored still carries the
+ *   column default of 0. Rendering that as "0.0, below threshold by 55" states a
+ *   measurement that was never taken.
+ * - `rateEstimable`: the kinetics module sets this false when the series is too
+ *   short or too brief to fit a slope, and its own docs say callers must "treat
+ *   velocity and acceleration as unknown rather than zero-meaning-flat". The
+ *   stored 0 is a placeholder, not an observation of a flat trend.
+ */
+interface TrendEvidence {
+  scored: boolean;
+  rateEstimable: boolean;
+  observations: number | null;
+  spanHours: number | null;
+}
+
+const NO_EVIDENCE: TrendEvidence = { scored: false, rateEstimable: false, observations: null, spanHours: null };
+
+function finiteOrNull(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function readEvidence(raw: unknown): TrendEvidence {
+  if (!raw || typeof raw !== 'object') return NO_EVIDENCE;
+  const record = raw as Record<string, unknown>;
+  const scored = Array.isArray(record.contributions) && record.contributions.length > 0;
+  const kinetics = record.kinetics;
+  if (!kinetics || typeof kinetics !== 'object') return { ...NO_EVIDENCE, scored };
+  const k = kinetics as Record<string, unknown>;
+  return {
+    scored,
+    rateEstimable: k.rateEstimable === true,
+    observations: finiteOrNull(k.n),
+    spanHours: finiteOrNull(k.spanHours),
+  };
+}
 
 export function OpportunitiesPage() {
   const { can } = useSession();
@@ -157,6 +201,11 @@ export function OpportunitiesPage() {
 
   const clearingCount = useMemo(() => trends.filter(clearsThreshold).length, [trends, generationThreshold]);
   const unconfirmed = useMemo(() => visible.filter((t) => t.sourceCount < MIN_SOURCES).length, [visible]);
+  const unmeasured = useMemo(
+    () => visible.filter((t) => !readEvidence(t.scoreBreakdown).rateEstimable).length,
+    [visible],
+  );
+  const unscored = useMemo(() => visible.filter((t) => !readEvidence(t.scoreBreakdown).scored).length, [visible]);
 
   const runButton = can('run_research') ? (
     <button
@@ -358,6 +407,21 @@ export function OpportunitiesPage() {
                   should not be read as confirmed.
                 </Note>
               )}
+              {unmeasured > 0 && (
+                <Note tone="warning">
+                  {formatNumber(unmeasured)} of {formatNumber(visible.length)} listed trends have not been observed long
+                  enough to fit a growth rate. Their velocity and acceleration are shown as{' '}
+                  <span className="font-medium">not measurable</span> rather than as zero — the platform has not seen
+                  them go flat, it has not yet seen them at all. Their scores are held down until it can tell.
+                </Note>
+              )}
+              {unscored > 0 && (
+                <Note tone="warning">
+                  {formatNumber(unscored)} of {formatNumber(visible.length)} listed trends have been discovered but have
+                  not been through a scoring pass. They are shown without a score rather than with the stored default of
+                  zero, and they sort last.
+                </Note>
+              )}
 
               <DataTable>
                 <thead>
@@ -375,6 +439,7 @@ export function OpportunitiesPage() {
                 <tbody>
                   {visible.map((t) => {
                     const clears = clearsThreshold(t);
+                    const evidence = readEvidence(t.scoreBreakdown);
                     return (
                       <tr key={t.id} className="transition-colors hover:bg-surface-hover/60">
                         <Td className="min-w-[16rem] max-w-[22rem]">

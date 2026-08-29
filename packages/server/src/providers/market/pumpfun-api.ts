@@ -69,6 +69,12 @@ import type { MarketProvider, PriceProvider, ProviderStatus, TokenMarketData } f
  *    an empty array rather than an error. At current launch rates that is only
  *    ~25 minutes of history, which is the hard ceiling on the graduation-rate
  *    window computed by `marketRegime()`.
+ *  - `mayhem_state` (`active`/`paused`/`completed`) is undocumented and rides on
+ *    roughly a QUARTER of the live launch feed. It matters because a Mayhem coin's
+ *    curve can be wound back behind its genesis allocation: ~9% of sampled coins
+ *    report `real_token_reserves` ABOVE the 79.31% initial allocation (a few even
+ *    above total supply) while carrying a perfectly standard 1e9 supply. Those
+ *    are reported as `curve-rewound`, not `bad-supply`.
  *  - Non-launch entries exist: `/coins/So111...112` returns wSOL with
  *    `complete: true`, no `program`, and no reserves at all. Curve maths must
  *    degrade to `undefined` for these, not to zero.
@@ -215,8 +221,19 @@ export interface PumpFunCoinExtras {
   replyCount?: number;
   nsfw?: boolean;
   isCurrentlyLive?: boolean;
+  /**
+   * pump.fun "Mayhem" cycle state (`active` / `paused` / `completed`), absent on
+   * ordinary coins. Roughly a quarter of the live launch feed carries one, and a
+   * mayhem coin's curve can be wound BACKWARDS behind its genesis allocation, so
+   * this is a first-class caveat on every curve number below — not decoration.
+   */
+  mayhemState?: string;
   /** Set when `bondingCurveProgress` was withheld, explaining which check failed. */
-  curveProgressUnavailableReason?: 'no-reserves' | 'inconsistent-snapshot' | 'bad-supply';
+  curveProgressUnavailableReason?:
+    | 'no-reserves'
+    | 'inconsistent-snapshot'
+    | 'bad-supply'
+    | 'curve-rewound';
 }
 
 export interface PumpFunTokenMarketData extends TokenMarketData {
@@ -535,12 +552,17 @@ export function createPumpFunProvider(deps: PumpFunProviderOptions = {}): PumpFu
     const out: PumpFunTokenMarketData[] = [];
     const seen = new Set<string>();
     // Pages beyond the offset ceiling come back empty; stop rather than spin.
-    for (let offset = 0; out.length < wanted && offset <= MAX_PAGE_OFFSET; offset += MAX_PAGE_LIMIT) {
+    // `offset` advances by the number of rows actually REQUESTED, not by the
+    // page cap: asking for a short final page and then stepping a full 70 would
+    // skip the rows in between whenever dedupe leaves the loop short of `wanted`.
+    for (let offset = 0; out.length < wanted && offset <= MAX_PAGE_OFFSET; ) {
+      const pageLimit = Math.min(MAX_PAGE_LIMIT, wanted - out.length);
+      offset += pageLimit;
       const page = await listCoins({
         sort: 'created_timestamp',
         order: 'DESC',
-        offset,
-        limit: Math.min(MAX_PAGE_LIMIT, wanted - out.length),
+        offset: offset - pageLimit,
+        limit: pageLimit,
         // NSFW coins are still launches and still consume attention, so they
         // belong in the saturation and regime samples even though they would
         // never be a launch candidate for us.
@@ -766,13 +788,16 @@ export function createPumpFunProvider(deps: PumpFunProviderOptions = {}): PumpFu
       for (
         let offset = graduationStart;
         sample.length < graduationSampleSize && offset <= MAX_PAGE_OFFSET;
-        offset += MAX_PAGE_LIMIT
+
       ) {
+        // Step by the rows requested, not the page cap — see `recentLaunches`.
+        const pageLimit = Math.min(MAX_PAGE_LIMIT, graduationSampleSize - sample.length);
+        offset += pageLimit;
         const page = await listCoins({
           sort: 'created_timestamp',
           order: 'DESC',
-          offset,
-          limit: Math.min(MAX_PAGE_LIMIT, graduationSampleSize - sample.length),
+          offset: offset - pageLimit,
+          limit: pageLimit,
           includeNsfw: true,
           // Deep pages change slowly relative to the head of the feed.
           cacheTtlMs: 30_000,
@@ -876,6 +901,10 @@ function toTokenMarketData(
   const marketCapQuote = finiteNumber(raw['market_cap_quote']) ?? (quoteIsSol ? marketCapSol : undefined);
   const marketCapUsd = finiteNumber(raw['usd_market_cap']) ?? finiteNumber(raw['market_cap_usd']);
 
+  // Enum-ish, server-authored ('active' | 'paused' | 'completed'), but sanitised
+  // and length-capped anyway rather than trusted as a closed set.
+  const mayhemState = sanitiseOptional(asString(raw['mayhem_state']), 32);
+
   const curve = computeCurveProgress({
     complete,
     realTokenReserves,
@@ -883,6 +912,7 @@ function toTokenMarketData(
     virtualQuoteReserves,
     totalSupply,
     marketCapQuote,
+    mayhemState,
   });
 
   // Price is derived from market cap over supply rather than from the reserve
@@ -933,6 +963,7 @@ function toTokenMarketData(
     ...optional('replyCount', finiteNumber(raw['reply_count'])),
     ...optional('nsfw', asBoolean(raw['nsfw'])),
     ...optional('isCurrentlyLive', asBoolean(raw['is_currently_live'])),
+    ...optional('mayhemState', mayhemState),
     ...optional('curveProgressUnavailableReason', curve.reason),
   };
 
@@ -998,6 +1029,7 @@ function computeCurveProgress(input: {
   virtualQuoteReserves: number | undefined;
   totalSupply: number | undefined;
   marketCapQuote: number | undefined;
+  mayhemState: string | undefined;
 }): { progress?: number; reason?: PumpFunCoinExtras['curveProgressUnavailableReason'] } {
   const { realTokenReserves, totalSupply, virtualQuoteReserves, virtualTokenReserves, marketCapQuote } =
     input;
@@ -1018,9 +1050,20 @@ function computeCurveProgress(input: {
       : STANDARD_CURVE_TOKENS_UI;
   if (!(initial > 0)) return { reason: 'bad-supply' };
 
-  // Reserves above the derived initial allocation mean the allocation is wrong,
-  // not that progress is negative.
-  if (realTokenReserves > initial * 1.001) return { reason: 'bad-supply' };
+  // Reserves ABOVE the genesis allocation. Measured live, this is ~9% of the
+  // launch feed, and it is not a bad supply figure: every such coin observed
+  // carried the standard 1e9 supply and a `mayhem_state`. The Mayhem mechanic
+  // lets a curve be sold back behind where it started, so `real_token_reserves`
+  // legitimately exceeds the 79.31% genesis allocation and the baseline for the
+  // current cycle is not recoverable from this payload.
+  //
+  // Progress is withheld rather than clamped to 0: "0% bonded" and "wound back
+  // behind the start of a mayhem cycle" are different claims, and this value
+  // feeds entry timing. The reason code separates the two causes so an operator
+  // is not sent looking for a supply bug that does not exist.
+  if (realTokenReserves > initial * 1.001) {
+    return { reason: input.mayhemState !== undefined ? 'curve-rewound' : 'bad-supply' };
+  }
 
   if (
     virtualQuoteReserves !== undefined &&

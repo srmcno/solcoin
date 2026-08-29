@@ -141,6 +141,13 @@ export interface PumpPortalNewTokenEvent {
   virtualTokenReserves?: number;
   virtualSolReserves?: number;
   marketCapSol?: number;
+  /**
+   * `is_mayhem_mode` — the coin launches into a pump.fun Mayhem cycle, whose
+   * curve can later be wound back behind its genesis allocation. The REST
+   * adapter surfaces the running state as `mayhem_state`; this is the flag as
+   * it appears at creation.
+   */
+  isMayhemMode?: boolean;
   /** When this process received the message, not when the slot landed. */
   receivedAt: number;
 }
@@ -780,6 +787,7 @@ function toNewTokenEvent(raw: Record<string, unknown>, receivedAt: number): Pump
     ...optional('virtualTokenReserves', positiveNumber(raw['vTokensInBondingCurve'])),
     ...optional('virtualSolReserves', positiveNumber(raw['vSolInBondingCurve'])),
     ...optional('marketCapSol', positiveNumber(raw['marketCapSol'])),
+    ...optional('isMayhemMode', asBoolean(raw['is_mayhem_mode'])),
     receivedAt,
   };
 }
@@ -845,6 +853,10 @@ function asBase58(value: unknown): string | null {
 
 function asSignature(value: unknown): string | null {
   return typeof value === 'string' && SIGNATURE_RE.test(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 /**

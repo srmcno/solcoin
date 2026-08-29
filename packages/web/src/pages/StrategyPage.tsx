@@ -27,7 +27,7 @@ import {
   Td,
   Th,
 } from '@/components/ui';
-import { formatNumber, formatPercent, formatScore, formatSol, humanise } from '@/lib/format';
+import { formatNumber, formatPercent, formatScore, formatSol } from '@/lib/format';
 import { POLL, queryKeys, useApiMutation, useApiQuery } from '@/lib/queries';
 
 // --- API shapes ------------------------------------------------------------

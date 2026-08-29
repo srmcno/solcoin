@@ -335,3 +335,111 @@ describe('pump.fun fee economics', () => {
     expect(estimateAmmCreatorFeeBps(0)).toBeCloseTo(30, 0);
   });
 });
+
+describe('degenerate observation windows', () => {
+  it('reports no measurable rate when every observation lands at once', () => {
+    // Several sources are polled together, so a freshly discovered trend can
+    // have five observations two seconds apart. Fitting a per-hour slope to
+    // that produced velocities in the thousands and ranked a single-source
+    // trend seen once above a genuine four-platform wave.
+    const simultaneous = [0, 1, 2, 3, 4].map((i) => ({ t: NOW + i * 400, v: 100 * (i + 1) }));
+    const k = computeKinetics(simultaneous);
+    expect(k.rateEstimable).toBe(false);
+    expect(k.relativeVelocity).toBe(0);
+    expect(k.acceleration).toBe(0);
+    expect(k.n).toBe(5);
+    expect(classifyPhase(k, 0)).toBe('nascent');
+  });
+
+  it('clamps an implausible growth rate rather than letting it dominate', () => {
+    // A counter reset or a backfill landing at once looks like astronomical
+    // growth; it is a data artefact, not a trend.
+    const spike = [
+      { t: NOW - 2 * HOUR, v: 1 },
+      { t: NOW - 1 * HOUR, v: 1 },
+      { t: NOW, v: 100_000_000 },
+    ];
+    const k = computeKinetics(spike);
+    expect(k.relativeVelocity).toBeLessThanOrEqual(2);
+    expect(Math.abs(k.acceleration)).toBeLessThanOrEqual(1);
+  });
+
+  it('still measures a genuine rate once the window is wide enough', () => {
+    const k = computeKinetics(series([10, 20, 40, 80, 160], 1));
+    expect(k.rateEstimable).toBe(true);
+    expect(k.relativeVelocity).toBeGreaterThan(0.5);
+    expect(k.relativeVelocity).toBeLessThanOrEqual(2);
+  });
+
+  it('ranks a confirmed, genuinely rising trend above a just-discovered one', () => {
+    const confirmed = scoreOpportunity({
+      kinetics: computeKinetics(series([10, 18, 32, 55, 95, 160], 4)),
+      phase: 'emerging',
+      ageHours: 20,
+      remainingLifespanHours: 100,
+      sourceCount: 4,
+      sourceDiversity: 0.85,
+      audienceEstimate: 400_000,
+      novelty: 0.7,
+      saturation: 0.05,
+      engagement: 0.5,
+      memeability: 0.6,
+    });
+    const justSeen = scoreOpportunity({
+      kinetics: computeKinetics([0, 1, 2].map((i) => ({ t: NOW + i * 500, v: 500 }))),
+      phase: 'nascent',
+      ageHours: 0,
+      remainingLifespanHours: 96,
+      sourceCount: 1,
+      sourceDiversity: 0.2,
+      audienceEstimate: 400_000,
+      novelty: 0.7,
+      saturation: 0.05,
+      engagement: 0.5,
+      memeability: 0.6,
+    });
+    expect(confirmed.score).toBeGreaterThan(justSeen.score);
+  });
+});
+
+describe('unmeasured growth is penalised, not treated as average', () => {
+  const shared = {
+    ageHours: 1,
+    remainingLifespanHours: 96,
+    sourceCount: 2,
+    sourceDiversity: 0.5,
+    audienceEstimate: 300_000,
+    novelty: 0.8,
+    saturation: 0.05,
+    engagement: 0.4,
+    memeability: 0.5,
+  };
+
+  it('scores a trend seen once well below one observed to be rising', () => {
+    const unmeasured = scoreOpportunity({
+      ...shared,
+      kinetics: computeKinetics([{ t: NOW, v: 500 }]),
+      phase: 'nascent',
+    });
+    const rising = scoreOpportunity({
+      ...shared,
+      kinetics: computeKinetics(series([100, 160, 260, 420, 680], 3)),
+      phase: 'emerging',
+    });
+    expect(unmeasured.score).toBeLessThan(rising.score * 0.75);
+    expect(unmeasured.rationale.join(' ')).toMatch(/not yet measurable/i);
+  });
+
+  it('holds an unmeasured trend below the default generation threshold', () => {
+    // The platform should wait for a second observation rather than spend money
+    // generating concepts for something it has seen once.
+    const unmeasured = scoreOpportunity({
+      ...shared,
+      sourceCount: 1,
+      sourceDiversity: 0.2,
+      kinetics: computeKinetics([{ t: NOW, v: 900 }]),
+      phase: 'nascent',
+    });
+    expect(unmeasured.score).toBeLessThan(52);
+  });
+});

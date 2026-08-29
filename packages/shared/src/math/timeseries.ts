@@ -1,4 +1,4 @@
-import { clamp, ewma, linearFit, mean, quantile, theilSenSlope } from './stats.js';
+import { clamp, ewma, linearFit, mean, theilSenSlope } from './stats.js';
 
 export interface TimePoint {
   /** Unix milliseconds. */
@@ -12,6 +12,28 @@ export function normaliseSeries(points: readonly TimePoint[]): TimePoint[] {
     .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
     .sort((a, b) => a.t - b.t);
 }
+
+/**
+ * Minimum observation span before a growth rate means anything.
+ *
+ * Several sources are polled together, so a freshly discovered trend can have
+ * five observations spread across two seconds. Fitting a per-hour slope to that
+ * divides by a near-zero time delta and produces enormous, meaningless
+ * velocities — which then dominate the opportunity score and rank a
+ * single-source trend seen once above a genuine four-platform wave. Below this
+ * span the honest answer is "no measurable rate yet", not a large number.
+ */
+const MIN_SPAN_HOURS = 0.5;
+
+/**
+ * Ceiling on fractional growth per hour.
+ *
+ * `relativeVelocity` is the slope of log interest, so 2.0 already means roughly
+ * a 7x increase every hour sustained. Anything beyond this is a data artefact
+ * (a source resetting a counter, a backfill landing at once) rather than a real
+ * trend, and is clamped so one bad datapoint cannot capture the ranking.
+ */
+const MAX_RELATIVE_VELOCITY = 2.0;
 
 export interface TrendKinetics {
   /** Latest observed value. */
@@ -28,6 +50,12 @@ export interface TrendKinetics {
   spanHours: number;
   /** Number of observations used. */
   n: number;
+  /**
+   * False when the observations are too close together in time to support a
+   * rate estimate. Callers should treat velocity and acceleration as unknown
+   * rather than zero-meaning-flat.
+   */
+  rateEstimable: boolean;
 }
 
 /**
@@ -41,20 +69,33 @@ export function computeKinetics(points: readonly TimePoint[]): TrendKinetics {
   const series = normaliseSeries(points);
   const n = series.length;
   if (n === 0) {
-    return { level: 0, velocity: 0, relativeVelocity: 0, acceleration: 0, consistency: 0, spanHours: 0, n: 0 };
+    return { level: 0, velocity: 0, relativeVelocity: 0, acceleration: 0, consistency: 0, spanHours: 0, n: 0, rateEstimable: false };
   }
   const last = series[n - 1]!;
   if (n === 1) {
-    return { level: last.v, velocity: 0, relativeVelocity: 0, acceleration: 0, consistency: 0, spanHours: 0, n: 1 };
+    return { level: last.v, velocity: 0, relativeVelocity: 0, acceleration: 0, consistency: 0, spanHours: 0, n: 1, rateEstimable: false };
   }
 
   const t0 = series[0]!.t;
   const spanHours = (last.t - t0) / 3_600_000;
+
+  if (spanHours < MIN_SPAN_HOURS) {
+    return {
+      level: last.v,
+      velocity: 0,
+      relativeVelocity: 0,
+      acceleration: 0,
+      consistency: 0,
+      spanHours,
+      n,
+      rateEstimable: false,
+    };
+  }
   const asHours = series.map((p) => ({ x: (p.t - t0) / 3_600_000, y: Math.log1p(Math.max(0, p.v)) }));
 
-  const velocityLog = theilSenSlope(asHours);
-  // Baseline = 25th percentile of the series, a stable "quiet level".
-  const baseline = Math.max(1, quantile(series.map((p) => p.v), 0.25));
+  // Pairs closer together than a few minutes cannot support a per-hour rate;
+  // including them is what produces the runaway slopes.
+  const velocityLog = clamp(theilSenSlope(asHours, MIN_SPAN_HOURS / 4), -MAX_RELATIVE_VELOCITY, MAX_RELATIVE_VELOCITY);
   const velocity = velocityLog * Math.max(1, last.v);
   const relativeVelocity = velocityLog; // slope of log ≈ fractional growth per hour
 
@@ -62,10 +103,10 @@ export function computeKinetics(points: readonly TimePoint[]): TrendKinetics {
   const mid = Math.floor(asHours.length / 2);
   const older = asHours.slice(0, Math.max(2, mid));
   const newer = asHours.slice(Math.min(asHours.length - 2, mid));
-  const slopeOld = theilSenSlope(older);
-  const slopeNew = theilSenSlope(newer);
+  const slopeOld = clamp(theilSenSlope(older, MIN_SPAN_HOURS / 4), -MAX_RELATIVE_VELOCITY, MAX_RELATIVE_VELOCITY);
+  const slopeNew = clamp(theilSenSlope(newer, MIN_SPAN_HOURS / 4), -MAX_RELATIVE_VELOCITY, MAX_RELATIVE_VELOCITY);
   const halfSpan = Math.max(0.25, spanHours / 2);
-  const acceleration = (slopeNew - slopeOld) / halfSpan;
+  const acceleration = clamp((slopeNew - slopeOld) / halfSpan, -1, 1);
 
   // Consistency: r² of the log-linear fit, penalised when the series oscillates.
   const { r2 } = linearFit(asHours);
@@ -82,6 +123,7 @@ export function computeKinetics(points: readonly TimePoint[]): TrendKinetics {
     consistency,
     spanHours,
     n,
+    rateEstimable: true,
   };
 }
 
@@ -93,7 +135,9 @@ export function computeKinetics(points: readonly TimePoint[]): TrendKinetics {
 export type TrendPhase = 'nascent' | 'emerging' | 'peaking' | 'declining' | 'dormant';
 
 export function classifyPhase(k: TrendKinetics, ageHours: number): TrendPhase {
-  if (k.n < 3 || k.spanHours < 1) return 'nascent';
+  // Without an estimable rate the only honest classification is 'nascent':
+  // the trend exists but nothing is yet known about where it is going.
+  if (!k.rateEstimable || k.n < 3 || k.spanHours < 1) return 'nascent';
   if (k.relativeVelocity > 0.05 && k.acceleration >= -0.01) {
     return ageHours < 72 ? 'emerging' : 'peaking';
   }

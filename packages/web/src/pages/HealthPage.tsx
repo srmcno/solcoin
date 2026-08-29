@@ -643,7 +643,8 @@ function JobsPanel({ jobs, canRun, canEdit }: { jobs: JobRow[]; canRun: boolean;
         )}
       </div>
 
-      <DataTable>
+      <div className="px-4 pb-4 sm:px-5">
+        <DataTable>
         <thead>
           <tr>
             <Th>Job</Th>
@@ -743,9 +744,11 @@ function JobsPanel({ jobs, canRun, canEdit }: { jobs: JobRow[]; canRun: boolean;
             );
           })}
         </tbody>
-      </DataTable>
+        </DataTable>
+      </div>
 
       <JobScheduleModal
+        key={str(editing?.name) || 'no-job'}
         job={editing}
         onClose={() => setEditing(null)}
         pending={patchJob.isPending}
@@ -910,7 +913,8 @@ function AuditPanel({ canView }: { canView: boolean }) {
             icon="◫"
           />
         ) : (
-          <DataTable>
+          <div className="px-4 pb-4 sm:px-5">
+            <DataTable>
             <thead>
               <tr>
                 <Th align="right">Seq</Th>
@@ -972,7 +976,8 @@ function AuditPanel({ canView }: { canView: boolean }) {
                 );
               })}
             </tbody>
-          </DataTable>
+            </DataTable>
+          </div>
         )}
       </Card>
     </div>
@@ -1092,7 +1097,8 @@ function LogsPanel() {
           }
         />
       ) : (
-        <DataTable>
+        <div className="px-4 pb-4 sm:px-5">
+          <DataTable>
           <thead>
             <tr>
               <Th>Time</Th>
@@ -1131,7 +1137,8 @@ function LogsPanel() {
               );
             })}
           </tbody>
-        </DataTable>
+          </DataTable>
+        </div>
       )}
     </Card>
   );
@@ -1284,7 +1291,8 @@ function DiagnosticsPanel() {
             icon="◆"
           />
         ) : (
-          <DataTable>
+          <div className="px-4 pb-4 sm:px-5">
+            <DataTable>
             <thead>
               <tr>
                 <Th>Adapter</Th>
@@ -1306,7 +1314,8 @@ function DiagnosticsPanel() {
                 </tr>
               ))}
             </tbody>
-          </DataTable>
+            </DataTable>
+          </div>
         )}
       </Card>
 
@@ -1321,7 +1330,8 @@ function DiagnosticsPanel() {
             icon="⬡"
           />
         ) : (
-          <DataTable>
+          <div className="px-4 pb-4 sm:px-5">
+            <DataTable>
             <thead>
               <tr>
                 <Th>Endpoint</Th>
@@ -1354,7 +1364,8 @@ function DiagnosticsPanel() {
                 );
               })}
             </tbody>
-          </DataTable>
+            </DataTable>
+          </div>
         )}
       </Card>
     </div>

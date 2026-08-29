@@ -109,9 +109,11 @@ export function logScale01(x: number, full: number): number {
  * Theil-Sen robust slope estimator. Resistant to the spikes and dropouts that
  * are endemic in social-media counts.
  *
- * Returns slope in units of `y` per unit of `x`.
+ * Returns slope in units of `y` per unit of `x`. Pairs whose `x` values are
+ * closer than `minDx` are skipped, because a rate computed across a negligible
+ * span is noise amplified rather than signal.
  */
-export function theilSenSlope(points: ReadonlyArray<{ x: number; y: number }>): number {
+export function theilSenSlope(points: ReadonlyArray<{ x: number; y: number }>, minDx = 1e-12): number {
   const n = points.length;
   if (n < 2) return 0;
   const slopes: number[] = [];
@@ -123,7 +125,10 @@ export function theilSenSlope(points: ReadonlyArray<{ x: number; y: number }>): 
       const a = points[i]!;
       const b = points[j]!;
       const dx = b.x - a.x;
-      if (Math.abs(dx) < 1e-12) continue;
+      // Pairs closer together than `minDx` cannot support a rate estimate:
+      // dividing by a near-zero span is what turns measurement noise into an
+      // enormous apparent slope.
+      if (Math.abs(dx) < minDx) continue;
       slopes.push((b.y - a.y) / dx);
     }
   }

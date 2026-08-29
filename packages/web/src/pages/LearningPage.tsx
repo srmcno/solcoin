@@ -1109,7 +1109,7 @@ function ErrorsSection({ query }: { query: ErrorsQueryLike }) {
           <thead>
             <tr>
               <Th>Launch</Th>
-              <Th>Predicted</Th>
+              <Th>Forecast made</Th>
               {HEADS.map((h) => (
                 <Th key={h} align="center">
                   {HEAD_LABEL[h]}
