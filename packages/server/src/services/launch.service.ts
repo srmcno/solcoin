@@ -364,6 +364,44 @@ export class LaunchService {
     } catch (e) {
       const code = errorCode(e);
       const message = safeErrorText(e, 600);
+
+      /*
+       * A signed attempt is not a failed one.
+       *
+       * `onSigned` persists the signature before the first broadcast, so a
+       * throw after that point means the transaction was sent and something
+       * downstream — a status poll, an RPC that went away — failed. The
+       * transaction may still land. Marking it `failed` puts it outside
+       * `listUnresolved`, which only scans `preparing` and `submitted`, so
+       * nothing would ever finalise it; worse, the retry path retires a failed
+       * launch's idempotency key, so a person pressing retry could mint a
+       * second token for a transaction that was already on its way.
+       *
+       * It stays `submitted` until the chain says otherwise. Recovery resolves
+       * it, and gives up as `expired` only once the blockhash cannot land.
+       */
+      const signed = this.db.$raw
+        .prepare('SELECT transaction_signature FROM launches WHERE id = ?')
+        .get(launchId) as { transaction_signature: string | null } | undefined;
+
+      if (signed?.transaction_signature) {
+        this.recordAttempt(launchId, code, message);
+        this.log.warn(
+          { launchId, signature: signed.transaction_signature, code },
+          'a broadcast launch failed before confirmation; leaving it submitted for recovery rather than calling it failed',
+        );
+        return {
+          launchId,
+          status: 'blocked',
+          network,
+          error:
+            `The launch transaction was broadcast but its outcome is not yet known: ${message} ` +
+            'It is being reconciled on chain and will not be retried until that resolves.',
+          errorCode: 'conflict',
+          simulated: network === 'simulation',
+        };
+      }
+
       this.recordFailure(launchId, code, message);
 
       this.audit.record({
@@ -483,6 +521,18 @@ export class LaunchService {
     return null;
   }
 
+  /** Append to the attempt log without deciding the launch's fate. */
+  private recordAttempt(launchId: string, code: string, message: string): void {
+    const row = this.db.$raw.prepare('SELECT attempt_log FROM launches WHERE id = ?').get(launchId) as
+      | { attempt_log: string }
+      | undefined;
+    const log = parseJson<Array<Record<string, unknown>>>(row?.attempt_log, []);
+    log.push({ at: this.now(), code, message: message.slice(0, 400) });
+    this.db.$raw
+      .prepare('UPDATE launches SET last_error = ?, error_code = ?, attempt_log = ?, updated_at = ? WHERE id = ?')
+      .run(message, code, JSON.stringify(log.slice(-20)), this.now(), launchId);
+  }
+
   private recordFailure(launchId: string, code: string, message: string): void {
     const row = this.db.$raw.prepare('SELECT attempt_log FROM launches WHERE id = ?').get(launchId) as
       | { attempt_log: string }
@@ -516,7 +566,8 @@ export class LaunchService {
       .prepare(
         `UPDATE launches
             SET status = 'abandoned', idempotency_key = 'retired:' || id, updated_at = ?
-          WHERE idempotency_key = ? AND status IN ('failed','abandoned')`,
+          WHERE idempotency_key = ? AND status IN ('failed','abandoned')
+            AND transaction_signature IS NULL`,
       )
       .run(this.now(), key).changes;
     if (retired > 0) {

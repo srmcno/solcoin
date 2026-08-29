@@ -175,8 +175,13 @@ export class JobScheduler {
     const controller = new AbortController();
     this.running.set(job.name, controller);
 
-    const timer = setTimeout(() => controller.abort(new Error(`job timed out after ${timeoutMs}ms`)), timeoutMs);
     let itemsProcessed = 0;
+    let timeoutReject: ((reason: Error) => void) | null = null;
+    const timer = setTimeout(() => {
+      const error = new Error(`job timed out after ${timeoutMs}ms`);
+      controller.abort(error);
+      timeoutReject?.(error);
+    }, timeoutMs);
 
     this.options.db.$raw
       .prepare(
@@ -186,15 +191,42 @@ export class JobScheduler {
       .run(runId, job.name, 'running', lockToken, trigger, this.now(), this.now());
 
     const started = this.now();
-    try {
-      const outcome = await job.run({
+
+    /*
+     * The abort signal is a request, not a guarantee.
+     *
+     * Aborting the controller only tells a cooperating job to stop. A job that
+     * does not consume the signal — or a provider inside it that ignores the
+     * one it was handed — leaves `job.run(...)` pending forever, so the run
+     * never finishes, the slot stays occupied for the life of the process, and
+     * the database lease expires underneath it, letting a second scheduler
+     * start the same work.
+     *
+     * Racing the run against the deadline bounds it whether or not anyone is
+     * listening. The abandoned work may still be running, so the lease is held
+     * until it actually settles: releasing it at the deadline is precisely
+     * what would let two copies overlap.
+     */
+    let settled = false;
+    const timedOut = new Promise<never>((_, reject) => {
+      timeoutReject = reject;
+    });
+
+    const work = job
+      .run({
         signal: controller.signal,
         runId,
         progress: (count, note) => {
           itemsProcessed = count;
           if (note) this.log.debug({ job: job.name, count, note }, 'job progress');
         },
+      })
+      .finally(() => {
+        settled = true;
       });
+
+    try {
+      const outcome = await Promise.race([work, timedOut]);
       const duration = this.now() - started;
       itemsProcessed = outcome?.itemsProcessed ?? itemsProcessed;
 
@@ -222,10 +254,31 @@ export class JobScheduler {
       this.log.error({ job: job.name, err: message, durationMs: duration }, 'job failed');
     } finally {
       clearTimeout(timer);
-      this.running.delete(job.name);
-      this.options.db.$raw
-        .prepare(`UPDATE job_state SET locked_until = NULL, lock_token = NULL, updated_at = ? WHERE job_name = ? AND lock_token = ?`)
-        .run(this.now(), job.name, lockToken);
+
+      const release = (): void => {
+        this.running.delete(job.name);
+        this.options.db.$raw
+          .prepare(`UPDATE job_state SET locked_until = NULL, lock_token = NULL, updated_at = ? WHERE job_name = ? AND lock_token = ?`)
+          .run(this.now(), job.name, lockToken);
+      };
+
+      if (settled) {
+        release();
+      } else {
+        // Timed out with the work still running. Holding the lease until it
+        // stops is the whole point: a second copy started now would be doing
+        // the same side effects alongside the first.
+        this.log.warn(
+          { job: job.name, timeoutMs },
+          'job exceeded its timeout and did not stop; holding its lease until the abandoned run settles',
+        );
+        void work
+          .catch(() => undefined)
+          .finally(() => {
+            this.log.warn({ job: job.name }, 'an abandoned job run finally settled; releasing its lease');
+            release();
+          });
+      }
     }
   }
 

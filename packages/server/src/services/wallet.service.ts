@@ -390,6 +390,33 @@ export class WalletService {
       throw new AppError('validation_failed', 'The destination is the operating wallet itself.');
     }
 
+    /*
+     * Refuse while an earlier transfer to the same destination is unresolved.
+     *
+     * The idempotency key below is bucketed by minute so a deliberate repeat
+     * transfer is possible later. That is also a hole: a transfer whose
+     * outcome is unknown stays unknown for longer than a minute, and without
+     * this a person retrying would send the amount a second time while the
+     * first was still settling. The reconciler resolves the earlier one; until
+     * it does, the honest answer is no.
+     */
+    const unresolved = this.db.$raw
+      .prepare(
+        `SELECT id, signature FROM wallet_transactions
+          WHERE direction = 'out' AND status = 'pending' AND counterparty = ? AND lamports = ?
+          ORDER BY occurred_at DESC LIMIT 1`,
+      )
+      .get(destination.toBase58(), input.lamports) as { id: string; signature: string | null } | undefined;
+    if (unresolved) {
+      throw new AppError(
+        'conflict',
+        `An identical transfer to this destination is still unresolved${
+          unresolved.signature ? ` (signature ${unresolved.signature})` : ''
+        }. Wait for it to be reconciled rather than sending the amount twice.`,
+        { details: { transactionId: unresolved.id }, retryable: true },
+      );
+    }
+
     const balance = await this.rpc.getBalance(source ?? destination);
 
     const idempotencyKey =
@@ -450,7 +477,15 @@ export class WalletService {
           toPubkey: destination,
           lamports: input.lamports,
         });
-        return this.rpc!.sendTransaction([instruction], payer, { skipSimulation: false });
+        return this.rpc!.sendTransaction([instruction], payer, {
+          skipSimulation: false,
+          // Recorded before the first broadcast, as the launch path does. A
+          // signature written only on success is no use in the one case it is
+          // needed: the transaction went out and something after that failed.
+          onSigned: ({ signature }) => {
+            this.db.$raw.prepare('UPDATE wallet_transactions SET signature = ? WHERE id = ?').run(signature, txId);
+          },
+        });
       });
 
       this.db.$raw
@@ -484,6 +519,36 @@ export class WalletService {
       return { signature: result.signature, lamports: input.lamports };
     } catch (e) {
       const message = safeErrorText(e, 400);
+
+      /*
+       * A broadcast transfer whose confirmation failed is not a failed
+       * transfer — the SOL may well have moved. Calling it `failed` loses it:
+       * the reconciler only looks at `pending` rows, so nothing would resolve
+       * it, and the idempotency key is bucketed by minute, so a retry a minute
+       * later would send the amount a second time while the first was still
+       * settling.
+       *
+       * It stays `pending` with its signature, which is exactly what the
+       * reconciler needs to ask the chain what happened.
+       */
+      const signed = this.db.$raw.prepare('SELECT signature FROM wallet_transactions WHERE id = ?').get(txId) as
+        | { signature: string | null }
+        | undefined;
+
+      if (signed?.signature) {
+        this.db.$raw.prepare('UPDATE wallet_transactions SET error = ? WHERE id = ?').run(message, txId);
+        this.log.warn(
+          { txId, signature: signed.signature },
+          'a broadcast transfer failed before confirmation; leaving it pending for reconciliation',
+        );
+        throw new AppError(
+          'conflict',
+          `The transfer was broadcast but its outcome is not yet known: ${message} It is being reconciled on chain. ` +
+            'Do not resend it until that resolves.',
+          { cause: e },
+        );
+      }
+
       this.db.$raw
         .prepare(`UPDATE wallet_transactions SET status = 'failed', error = ? WHERE id = ?`)
         .run(message, txId);

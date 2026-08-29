@@ -334,7 +334,8 @@ export class GuardService {
             SET status = 'abandoned',
                 idempotency_key = 'retired:' || id,
                 updated_at = ?
-          WHERE network = ? AND status = 'failed'`,
+          WHERE network = ? AND status = 'failed'
+            AND transaction_signature IS NULL`,
       )
       .run(this.now(), network).changes;
 

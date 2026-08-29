@@ -208,10 +208,10 @@ describe('outgoing transactions left pending', () => {
     return new WalletService(
       harness.db,
       harness.settings,
+      { getPublicKey: async () => null, getRecord: async () => null } as never,
       harness.guard,
       harness.audit,
       harness.events,
-      { getPublicKey: async () => null, getRecord: async () => null } as never,
       null,
       () => harness.clock.now(),
     );
@@ -257,10 +257,10 @@ describe('outgoing transactions left pending', () => {
     const wallet = new WalletService(
       harness.db,
       harness.settings,
+      { getPublicKey: async () => null, getRecord: async () => null } as never,
       harness.guard,
       harness.audit,
       harness.events,
-      { getPublicKey: async () => null, getRecord: async () => null } as never,
       rpc as never,
       () => harness.clock.now(),
     );
@@ -320,5 +320,143 @@ describe('candidates stranded mid-launch', () => {
     seedLaunching('cpt_inflight', 30_000, false);
     expect(service().restoreStrandedCandidates()).toBe(0);
     expect(statusOf('cpt_inflight')).toBe('launching');
+  });
+});
+
+describe('a broadcast transaction is never called failed', () => {
+  /**
+   * The dangerous asymmetry: "the confirmation failed" and "the transaction
+   * failed" are not the same claim, and only the chain can tell them apart.
+   * Recording the second when only the first is known loses the transaction —
+   * and, because a retry retires a failed launch's idempotency key, invites a
+   * second token for one that was already on its way.
+   */
+  it('leaves a signed launch submitted when confirmation throws', async () => {
+    seedFailedLaunch('lch_sig', 'cpt_sig');
+    // Reshape the seeded row into the real situation: broadcast, signature
+    // recorded by `onSigned`, then the confirmation poll died.
+    harness.db.$raw
+      .prepare(`UPDATE launches SET status = 'failed', transaction_signature = 'Sig-broadcast' WHERE id = ?`)
+      .run('lch_sig');
+
+    // Neither retirement path may free it: doing so would let a second token
+    // be minted for a transaction that may still land.
+    expect(service().retireFailed('cpt_sig', 'simulation')).toBe(0);
+    expect(harness.guard.clearLaunchFailures({ actorId: 'usr_1' }, 'acknowledged')).toBe(0);
+
+    const row = harness.db.$raw.prepare('SELECT status, idempotency_key FROM launches WHERE id = ?').get('lch_sig') as {
+      status: string;
+      idempotency_key: string;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.idempotency_key).not.toMatch(/^retired:/);
+  });
+
+  it('still frees an attempt that never reached the chain', () => {
+    seedFailedLaunch('lch_nosig', 'cpt_nosig');
+    // No signature: nothing was broadcast, so there is nothing to duplicate.
+    expect(service().retireFailed('cpt_nosig', 'simulation')).toBe(1);
+  });
+});
+
+describe('a transfer whose confirmation fails', () => {
+  const DEST = 'BqPYaPBw7DUZQ7NBLKAyDMJDaTGCPB2LMbP2ecmKfEXk';
+
+  function walletWith(rpc: unknown) {
+    // The phase ladder refuses a network the current phase does not permit, and
+    // it is checked before the network — which is exactly what stops an
+    // accidental mainnet launch — so the phase moves first.
+    harness.settings.update({ execution: { phase: 'phase2_devnet' } }, { type: 'system' });
+    harness.settings.update(
+      {
+        autonomy: { wallet_transfer: 'approve' },
+        execution: { network: 'devnet' },
+        limits: { maxSolSpendPerDay: 5, maxSolPerHour: 5, maxSolPerTransaction: 5 },
+      },
+      { type: 'system' },
+    );
+    const signer = Keypair.fromSeed(new Uint8Array(32).fill(21));
+    return new WalletService(
+      harness.db,
+      harness.settings,
+      {
+        getPublicKey: async () => signer.publicKey.toBase58(),
+        getRecord: async () => ({ publicKey: signer.publicKey.toBase58() }),
+        withSigner: async <T>(fn: (kp: Keypair) => Promise<T>): Promise<T> => fn(signer),
+      } as never,
+      harness.guard,
+      harness.audit,
+      harness.events,
+      rpc as never,
+      () => harness.clock.now(),
+    );
+  }
+
+  /** Broadcasts, reports the signature, then dies before confirming. */
+  const broadcastThenFail = {
+    getBalance: async () => 5_000_000_000,
+    sendTransaction: async (
+      _ix: unknown,
+      _payer: unknown,
+      options: { onSigned?: (i: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void },
+    ) => {
+      await options.onSigned?.({ signature: 'Sig-in-flight', blockhash: 'bh', lastValidBlockHeight: 1 });
+      throw new Error('status poll failed after the transaction was broadcast');
+    },
+  };
+
+  it('stays pending with its signature rather than being called failed', async () => {
+    const wallet = walletWith(broadcastThenFail);
+    await expect(
+      wallet.transfer({ destination: DEST, lamports: 1_000_000, purpose: 'manual_transfer', actorId: 'usr_1' }),
+    ).rejects.toThrow(/not yet known/i);
+
+    const row = harness.db.$raw
+      .prepare(`SELECT status, signature FROM wallet_transactions WHERE direction = 'out' ORDER BY created_at DESC LIMIT 1`)
+      .get() as { status: string; signature: string | null };
+
+    // `failed` would put it outside the reconciler, which only looks at
+    // pending rows — losing a transfer whose SOL may well have moved.
+    expect(row.status).toBe('pending');
+    expect(row.signature).toBe('Sig-in-flight');
+  });
+
+  it('refuses an identical transfer while the first is unresolved', async () => {
+    const wallet = walletWith(broadcastThenFail);
+    await expect(
+      wallet.transfer({ destination: DEST, lamports: 1_000_000, purpose: 'manual_transfer', actorId: 'usr_1' }),
+    ).rejects.toThrow(/not yet known/i);
+
+    // The idempotency key is bucketed by minute, so a retry a minute later
+    // would otherwise send the amount a second time.
+    harness.clock.advance(5 * 60_000);
+    await expect(
+      wallet.transfer({ destination: DEST, lamports: 1_000_000, purpose: 'manual_transfer', actorId: 'usr_1' }),
+    ).rejects.toThrow(/still unresolved/i);
+
+    const count = harness.db.$raw
+      .prepare(`SELECT COUNT(*) AS n FROM wallet_transactions WHERE direction = 'out'`)
+      .get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it('still marks a transfer failed when nothing was ever broadcast', async () => {
+    const wallet = walletWith({
+      getBalance: async () => 5_000_000_000,
+      sendTransaction: async () => {
+        throw new Error('the RPC refused the transaction outright');
+      },
+    });
+
+    await expect(
+      wallet.transfer({ destination: DEST, lamports: 1_000_000, purpose: 'manual_transfer', actorId: 'usr_1' }),
+    ).rejects.toThrow(/refused the transaction/i);
+
+    const row = harness.db.$raw
+      .prepare(`SELECT status, signature FROM wallet_transactions WHERE direction = 'out' ORDER BY created_at DESC LIMIT 1`)
+      .get() as { status: string; signature: string | null };
+    // No signature means nothing went out, so there is nothing to reconcile.
+    expect(row.status).toBe('failed');
+    expect(row.signature).toBeNull();
   });
 });
