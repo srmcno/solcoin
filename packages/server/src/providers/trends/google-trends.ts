@@ -221,7 +221,11 @@ export function createGoogleTrendsProvider(deps: GoogleTrendsProviderOptions = {
       });
 
       const limit = Math.max(0, Math.floor(options.limit));
-      return ranked.slice(0, limit).map((topic, i) => toSignal(topic, i + 1, geos.length, observedAt));
+      // Breadth is a fraction of the geos that actually answered, not of the
+      // geos configured: a topic in 2 of 2 successful geos is not "50% breadth"
+      // because a third geo timed out.
+      const sweptGeos = geos.length - failures;
+      return ranked.slice(0, limit).map((topic, i) => toSignal(topic, i + 1, sweptGeos, observedAt));
     },
   };
 }
@@ -273,11 +277,21 @@ function mergeTopic(into: Map<string, MergedTopic>, item: ParsedItem): void {
     return;
   }
 
-  existing.totalTraffic += item.traffic;
   existing.bestRank = Math.min(existing.bestRank, item.rank);
   existing.geos.add(item.geo);
-  // A geo repeated inside one sweep would double-count; keep the larger bucket.
-  existing.perGeoTraffic[item.geo] = Math.max(existing.perGeoTraffic[item.geo] ?? 0, item.traffic);
+  // Two items in one geo's feed can normalise to the same key (Google emits
+  // near-duplicate phrasings of one story). Adding both would inflate the topic
+  // by a geo it only occupies once, so the per-geo bucket keeps the larger
+  // figure and the total is adjusted by the delta. This preserves the invariant
+  // that totalTraffic is exactly the sum of perGeoTraffic.
+  const prior = existing.perGeoTraffic[item.geo];
+  if (prior === undefined) {
+    existing.perGeoTraffic[item.geo] = item.traffic;
+    existing.totalTraffic += item.traffic;
+  } else if (item.traffic > prior) {
+    existing.perGeoTraffic[item.geo] = item.traffic;
+    existing.totalTraffic += item.traffic - prior;
+  }
   existing.summary ??= item.summary;
   existing.url ??= item.url;
   if (item.publishedAt !== undefined) {
@@ -288,6 +302,7 @@ function mergeTopic(into: Map<string, MergedTopic>, item: ParsedItem): void {
   for (const s of item.newsSources) existing.newsSources.add(s);
 }
 
+/** `geoCount` is the number of geos that answered this sweep, not the number configured. */
 function toSignal(topic: MergedTopic, rank: number, geoCount: number, observedAt: number): RawTrendSignal {
   const breadth = topic.geos.size;
   const audience = Math.round(topic.totalTraffic * (1 + GEO_BREADTH_BONUS * (breadth - 1)));
@@ -305,9 +320,9 @@ function toSignal(topic: MergedTopic, rank: number, geoCount: number, observedAt
     metadata: {
       geos: [...topic.geos],
       geoCount: breadth,
-      // Fraction of the swept geos carrying this topic: a cheap breadth feature
-      // downstream scoring can use without re-deriving it.
-      geoBreadth: geoCount > 0 ? breadth / geoCount : 0,
+      // Fraction of the geos that answered which carried this topic: a cheap
+      // breadth feature downstream scoring can use without re-deriving it.
+      geoBreadth: geoCount > 0 ? Math.min(1, breadth / geoCount) : 0,
       perGeoTraffic: topic.perGeoTraffic,
       bestGeoRank: topic.bestRank,
       newsSources: [...topic.newsSources].slice(0, 5),

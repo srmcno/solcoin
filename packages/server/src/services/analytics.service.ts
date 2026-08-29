@@ -170,6 +170,11 @@ export interface OverviewMetrics {
   revenuePerLaunch: {
     meanSol: number;
     medianSol: number;
+    p90Sol: number;
+    /** Share of all revenue earned by the best-earning tenth of tokens. */
+    topTenPercentShare: number;
+    /** meanSol / medianSol; null when the median is zero. Above ~2 the mean is a tail statistic. */
+    meanToMedianRatio: number | null;
     n: number;
     reliable: boolean;
   };
@@ -238,6 +243,9 @@ export interface RevenueDistributionStats {
    * context before quoting the number.
    */
   topOnePercentSpansTokens: number;
+  /** How many tokens the top 5% / 10% actually span, for the same reason. */
+  topFivePercentSpansTokens: number;
+  topTenPercentSpansTokens: number;
   /** 0 = every token earned the same, 1 = one token earned everything. */
   gini: number;
   /** Fraction (and count) of tokens whose lifetime fees are below the dust threshold. */
@@ -252,6 +260,16 @@ export interface RevenueDistributionStats {
    */
   meanToMedianRatio: number | null;
   includesAccrued: boolean;
+  /**
+   * False when n < MIN_RELIABLE_N. Below that the shape statistics are
+   * arithmetic on a handful of points rather than descriptions of a
+   * distribution: a single token makes `gini` 0 and `topOnePercentShare` 1 at
+   * the same time, which is not a finding about concentration.
+   */
+  reliable: boolean;
+  minReliableN: number;
+  /** Which of the numbers above the sample size cannot actually support. */
+  caveats: string[];
 }
 
 export type RevenueDistribution =
@@ -308,12 +326,38 @@ export interface PnL {
 
   launches: number;
   successes: number;
+  /**
+   * Net profit divided by launch count. This is an allocation of an aggregate,
+   * not a description of a launch: read it next to `perLaunchFeesSol`, where
+   * the median is routinely an order of magnitude below the mean.
+   */
   profitPerLaunchSol: number | null;
-  /** Fraction of launches whose own lifetime fees covered their own cost. */
+  /**
+   * The distribution of what the launches in this window actually earned.
+   * Present so no caller has to infer a typical launch from a mean.
+   */
+  perLaunchFeesSol: {
+    meanSol: number;
+    medianSol: number;
+    p90Sol: number;
+    /** Share of cohort revenue earned by its best-earning tenth. */
+    topTenPercentShare: number;
+    n: number;
+    reliable: boolean;
+  };
+  /**
+   * Fraction of launches whose own lifetime fees covered their own direct cost,
+   * including USD-denominated costs converted at the latest known SOL price.
+   * When no SOL price is known those costs are omitted and a caveat says so.
+   */
   breakEvenRate: RateEstimate;
   costPerSuccessfulLaunchSol: number | null;
   organicVolumeSol: number;
-  /** Fees earned per 1,000 SOL of organic volume; the platform's take rate. */
+  /**
+   * Fees earned per 1,000 SOL of organic volume by the launches in this window
+   * — numerator and denominator are the same cohort, so this is a take rate
+   * rather than a ratio of two differently-scoped totals.
+   */
   revenuePer1000SolVolume: number | null;
 
   /** True when at least one launch fell in the window. */
@@ -392,7 +436,12 @@ export interface SignalCorrelation {
   feature: string;
   /** Spearman rank correlation with realised creator fees, -1..1. */
   correlation: number;
-  /** Fisher-z 95% interval on the correlation. Null when n < 4. */
+  /**
+   * Fisher-z 95% interval on the correlation. Null when n < 4, and also null
+   * when the sample correlation is exactly ±1: the z-transform diverges there,
+   * so any interval it produced would be an artefact of the clamp rather than
+   * a measure of uncertainty.
+   */
   lower: number | null;
   upper: number | null;
   n: number;
@@ -621,6 +670,24 @@ export class AnalyticsService {
       );
     }
 
+    const perLaunchMean = perToken.length > 0 ? mean(perToken) : 0;
+    const perLaunchMedian = perToken.length > 0 ? median(perToken) : 0;
+    const perLaunchRatio = perLaunchMedian > 0 ? perLaunchMean / perLaunchMedian : null;
+    if (perLaunchRatio !== null && perLaunchRatio >= 2) {
+      caveats.push(
+        `Mean revenue per launch (${perLaunchMean.toFixed(4)} SOL) is ${perLaunchRatio.toFixed(1)}x the median (${perLaunchMedian.toFixed(4)} SOL), and the top decile of tokens earned ${(topShare(perToken, 0.1) * 100).toFixed(0)}% of all revenue. The mean describes the tail, not a typical launch; use revenueDistribution() before planning against it.`,
+      );
+    } else if (perLaunchRatio === null && perToken.length > 0) {
+      caveats.push(
+        'The median token earned nothing, so revenue per launch has no meaningful central value; all of it sits in the tail.',
+      );
+    }
+    if ((tokenTotals?.accrued ?? 0) > 0) {
+      caveats.push(
+        'Lifetime revenue and net profit include fees accrued but not yet claimed. Unclaimed fees are an on-chain balance, not cash, and a claim can fail or be partially collected.',
+      );
+    }
+
     return {
       network,
       asOfMs,
@@ -656,8 +723,11 @@ export class AnalyticsService {
       graduationRate: this.rate(graduated, launched, 'wilson'),
       volume: { totalOrganicSol: tokenTotals?.volume ?? 0, n: launched },
       revenuePerLaunch: {
-        meanSol: perToken.length > 0 ? mean(perToken) : 0,
-        medianSol: perToken.length > 0 ? median(perToken) : 0,
+        meanSol: perLaunchMean,
+        medianSol: perLaunchMedian,
+        p90Sol: perToken.length > 0 ? quantile(perToken, 0.9) : 0,
+        topTenPercentShare: perToken.length > 0 ? topShare(perToken, 0.1) : 0,
+        meanToMedianRatio: perLaunchRatio,
         n: perToken.length,
         reliable: perToken.length >= MIN_RELIABLE_N,
       },
@@ -722,7 +792,37 @@ export class AnalyticsService {
     // `topShare` takes ceil(frac * n) tokens with a floor of one, so below 100
     // tokens the "top 1%" is literally the single best token. Surfacing the
     // span stops that being read as a percentile of a large population.
-    const topOnePercentSpansTokens = Math.max(1, Math.ceil(0.01 * n));
+    const spanOf = (frac: number): number => Math.max(1, Math.ceil(frac * n));
+    const topOnePercentSpansTokens = spanOf(0.01);
+    const topFivePercentSpansTokens = spanOf(0.05);
+    const topTenPercentSpansTokens = spanOf(0.1);
+
+    // The shape statistics below are only descriptions of a distribution once
+    // there is a distribution to describe. Rather than suppress them at small
+    // n — an operator with three tokens still wants to see their three numbers
+    // — they are returned flagged, with the specific failure named.
+    const reliable = n >= MIN_RELIABLE_N;
+    const caveats: string[] = [];
+    if (!reliable) {
+      caveats.push(
+        `Only ${n} token${n === 1 ? '' : 's'} match${n === 1 ? 'es' : ''} this filter (below the ${MIN_RELIABLE_N} needed for a distribution to be described). The percentiles, Gini coefficient and tail shares below are arithmetic on these ${n} values, not estimates of the underlying distribution.`,
+      );
+    }
+    if (n < 100) {
+      caveats.push(
+        `The "top 1%" here is ${topOnePercentSpansTokens} token${topOnePercentSpansTokens === 1 ? '' : 's'}, the top 5% is ${topFivePercentSpansTokens} and the top 10% is ${topTenPercentSpansTokens}; below 100 tokens these are the best few tokens, not percentiles of a population.`,
+      );
+    }
+    if (n < 20) {
+      caveats.push(
+        'p90 and p99 are interpolated between the two largest observations, so they restate the maximum rather than estimate a tail.',
+      );
+    }
+    if (n === 1) {
+      caveats.push(
+        'With a single token the Gini coefficient is 0 (perfect equality) and the top-1% share is 1 (perfect concentration) at the same time. Neither is a finding about concentration; both are artefacts of n = 1.',
+      );
+    }
 
     return {
       sufficient: true,
@@ -742,6 +842,8 @@ export class AnalyticsService {
       topFivePercentShare: topShare(values, 0.05),
       topTenPercentShare: topShare(values, 0.1),
       topOnePercentSpansTokens,
+      topFivePercentSpansTokens,
+      topTenPercentSpansTokens,
       gini: gini(values),
       dustFraction: dustCount / n,
       dustCount,
@@ -749,6 +851,9 @@ export class AnalyticsService {
       zeroCount,
       meanToMedianRatio: medianSol > 0 ? meanSol / medianSol : null,
       includesAccrued: includeAccrued,
+      reliable,
+      minReliableN: MIN_RELIABLE_N,
+      caveats,
     };
   }
 
@@ -834,13 +939,43 @@ export class AnalyticsService {
     // own direct cost? It answers a different question from aggregate ROI —
     // aggregate ROI can be positive because of one winner while almost every
     // individual launch lost money.
-    const brokeEven = samples.filter((s) => s.costSol > 0 && s.feesSol >= s.costSol).length;
-    const withCost = samples.filter((s) => s.costSol > 0).length;
+    // A launch's own cost includes the USD-denominated work that produced it
+    // (inference, artwork). Ignoring that because it is denominated in dollars
+    // would call launches profitable that only look profitable in one currency.
+    const fullCostSol = (s: LaunchSample): number =>
+      s.costSol + (solPriceUsd !== null && solPriceUsd > 0 ? s.costUsd / solPriceUsd : 0);
+    const withCostSamples = samples.filter((s) => fullCostSol(s) > 0);
+    const brokeEven = withCostSamples.filter((s) => s.feesSol >= fullCostSol(s)).length;
+    const withCost = withCostSamples.length;
+    const unconvertedUsd = sum(samples.map((s) => s.costUsd));
+    if (unconvertedUsd > 0 && (solPriceUsd === null || solPriceUsd <= 0)) {
+      caveats.push(
+        `Break-even is computed against on-chain cost only: ${unconvertedUsd.toFixed(2)} USD of per-launch cost could not be converted without a recorded SOL price, so the break-even rate is an upper bound.`,
+      );
+    }
 
     const organicVolumeSol = sum(samples.map((s) => s.volumeSol));
+    const cohortFees = samples.map((s) => s.feesSol);
+    const cohortFeesTotal = sum(cohortFees);
 
     if (launches === 0) {
       caveats.push('No launches fell in this window, so the per-launch statistics have no sample.');
+    } else {
+      const cohortMedian = median(cohortFees);
+      if (cohortMedian <= 0) {
+        caveats.push(
+          `The median launch in this window earned nothing; all cohort revenue came from ${cohortFees.filter((f) => f > 0).length} of ${launches} launches. Profit per launch is an allocation of an aggregate, not what a launch earns.`,
+        );
+      } else if (mean(cohortFees) / cohortMedian >= 2) {
+        caveats.push(
+          `Mean cohort fees per launch are ${(mean(cohortFees) / cohortMedian).toFixed(1)}x the median. Profit per launch divides an aggregate by a count and describes no individual launch; read breakEvenRate and perLaunchFeesSol instead.`,
+        );
+      }
+      if (launches < MIN_RELIABLE_N) {
+        caveats.push(
+          `Only ${launches} launches fell in this window, below the ${MIN_RELIABLE_N} at which per-launch statistics stop being dominated by chance.`,
+        );
+      }
     }
 
     return {
@@ -869,10 +1004,18 @@ export class AnalyticsService {
       launches,
       successes,
       profitPerLaunchSol: launches > 0 && netProfitSol !== null ? netProfitSol / launches : null,
+      perLaunchFeesSol: {
+        meanSol: launches > 0 ? mean(cohortFees) : 0,
+        medianSol: launches > 0 ? median(cohortFees) : 0,
+        p90Sol: launches > 0 ? quantile(cohortFees, 0.9) : 0,
+        topTenPercentShare: launches > 0 ? topShare(cohortFees, 0.1) : 0,
+        n: launches,
+        reliable: launches >= MIN_RELIABLE_N,
+      },
       breakEvenRate: this.rate(brokeEven, withCost, 'wilson'),
       costPerSuccessfulLaunchSol: successes > 0 && totalSolIncludingUsd !== null ? totalSolIncludingUsd / successes : null,
       organicVolumeSol,
-      revenuePer1000SolVolume: organicVolumeSol > 0 ? (revenueRealisedSol / organicVolumeSol) * 1000 : null,
+      revenuePer1000SolVolume: organicVolumeSol > 0 ? (cohortFeesTotal / organicVolumeSol) * 1000 : null,
       sufficient: launches > 0,
       reason: launches === 0 ? 'No launches in the window; only ledger totals are meaningful.' : undefined,
       caveats,
@@ -1040,7 +1183,7 @@ export class AnalyticsService {
     }
 
     const caveat =
-      'Observational, not causal. The sample contains only candidates the platform chose to launch, so every feature is range-restricted by the quality gate and any apparent effect is confounded with that selection. Treat a strong coefficient as a hypothesis to test with a deliberate exploration arm, never as a lever to pull.';
+      'Observational, not causal. The sample contains only candidates the platform chose to launch, so every feature is range-restricted by the quality gate and any apparent effect is confounded with that selection — the launches that would have tested the other end of each feature were never made. Outcomes are also right-censored: recently launched tokens are still accruing fees, so their revenue is understated relative to older ones, and any feature that drifted over time will correlate with that instead. Every feature is scored against the same outcome on the same sample, so the strongest of a long list is partly the winner of a multiple-comparisons draw. Treat a strong coefficient as a hypothesis to test with a deliberate exploration arm, never as a lever to pull.';
 
     if (observations.length === 0) return [];
 
@@ -1068,17 +1211,26 @@ export class AnalyticsService {
       const degenerate = new Set(xs).size < 2 || new Set(ys).size < 2;
       const correlation = degenerate ? 0 : spearman(xs, ys);
       const interval = degenerate ? { lower: null, upper: null } : fisherInterval(correlation, xs.length);
+      const perfect = !degenerate && Math.abs(correlation) >= 1;
+      let featureCaveat = caveat;
+      if (degenerate) {
+        featureCaveat = `This feature (or the fee outcome) never varied across the ${xs.length} observed launches, so no correlation is defined and 0 here means "unmeasurable", not "unrelated". ${caveat}`;
+      } else if (perfect) {
+        featureCaveat = `The ${xs.length} observed launches rank identically on this feature and on realised fees, giving a sample correlation of exactly ${correlation > 0 ? '+1' : '-1'}. A perfect rank order over a sample this small is what a coincidence looks like, and no confidence interval is defined for it, so none is reported. ${caveat}`;
+      } else if (interval.lower === null) {
+        featureCaveat = `Fewer than four launches carry this feature, so no interval can be computed and the coefficient is not interpretable. ${caveat}`;
+      }
       out.push({
         feature: key,
         correlation,
         lower: interval.lower,
         upper: interval.upper,
         n: xs.length,
-        reliable: !degenerate && xs.length >= MIN_CORRELATION_N,
+        // An interval is part of what makes a coefficient actionable; without
+        // one the number is never "reliable", however large n happens to be.
+        reliable: !degenerate && !perfect && interval.lower !== null && xs.length >= MIN_CORRELATION_N,
         degenerate,
-        caveat: degenerate
-          ? `This feature (or the fee outcome) never varied across the ${xs.length} observed launches, so no correlation is defined and 0 here means "unmeasurable", not "unrelated". ${caveat}`
-          : caveat,
+        caveat: featureCaveat,
       });
     }
 
@@ -1140,7 +1292,7 @@ export class AnalyticsService {
     // Costs not attributable to a launch (infrastructure, market data) recur
     // whether or not anything launches, so they are a fixed monthly line.
     const fixedMonthlyCostSol =
-      (lamportsToSol(expenses.unattributedLamports) / windowDays) * DAYS_PER_MONTH;
+      (lamportsToSol(expenses.nonLaunchLamports) / windowDays) * DAYS_PER_MONTH;
     const monthlyOperatingUsd = (expenses.operatingUsd / windowDays) * DAYS_PER_MONTH;
     const solPriceUsd = this.latestSolPriceUsd();
     const usdAsSol = solPriceUsd !== null && solPriceUsd > 0 ? monthlyOperatingUsd / solPriceUsd : 0;
@@ -1477,7 +1629,15 @@ export class AnalyticsService {
     allUsd: number;
     operatingLamports: number;
     operatingUsd: number;
-    unattributedLamports: number;
+    /**
+     * Operating lamports **not** already charged to a launch. Expense rows
+     * carry `ref_type` values other than 'launch' and NULL ('concept',
+     * 'trend', 'token', 'model', 'system', 'wallet'), and the per-launch cost
+     * in `launchSamples` only picks up `ref_type = 'launch'`. Counting only
+     * `ref_type IS NULL` here would drop every other kind from the cost side
+     * entirely and overstate profit.
+     */
+    nonLaunchLamports: number;
   } {
     const rows = this.db.$raw
       .prepare(
@@ -1485,7 +1645,7 @@ export class AnalyticsService {
                 COALESCE(SUM(amount_lamports), 0) AS lamports,
                 COALESCE(SUM(amount_usd), 0) AS usd,
                 COUNT(*) AS n,
-                COALESCE(SUM(CASE WHEN ref_type IS NULL THEN amount_lamports ELSE 0 END), 0) AS unattributed_lamports
+                COALESCE(SUM(CASE WHEN ref_type IS NULL OR ref_type <> 'launch' THEN amount_lamports ELSE 0 END), 0) AS non_launch_lamports
            FROM expenses
           WHERE incurred_at >= ? AND incurred_at < ?
           GROUP BY kind
@@ -1496,7 +1656,7 @@ export class AnalyticsService {
       lamports: number;
       usd: number;
       n: number;
-      unattributed_lamports: number;
+      non_launch_lamports: number;
     }>;
 
     const onChain = new Set<string>(ON_CHAIN_EXPENSE_KINDS);
@@ -1504,7 +1664,7 @@ export class AnalyticsService {
     let allUsd = 0;
     let operatingLamports = 0;
     let operatingUsd = 0;
-    let unattributedLamports = 0;
+    let nonLaunchLamports = 0;
     const byKind: CostByKind[] = [];
 
     for (const row of rows) {
@@ -1513,12 +1673,12 @@ export class AnalyticsService {
       if (!onChain.has(row.kind)) {
         operatingLamports += row.lamports;
         operatingUsd += row.usd;
-        unattributedLamports += row.unattributed_lamports;
+        nonLaunchLamports += row.non_launch_lamports;
       }
       byKind.push({ kind: row.kind, lamports: row.lamports, sol: lamportsToSol(row.lamports), usd: row.usd, n: row.n });
     }
 
-    return { byKind, allLamports, allUsd, operatingLamports, operatingUsd, unattributedLamports };
+    return { byKind, allLamports, allUsd, operatingLamports, operatingUsd, nonLaunchLamports };
   }
 
   /**
@@ -1700,8 +1860,14 @@ function spearman(xs: readonly number[], ys: readonly number[]): number {
  */
 function fisherInterval(r: number, n: number): { lower: number | null; upper: number | null } {
   if (n < 4) return { lower: null, upper: null };
-  const bounded = Math.max(-0.999999, Math.min(0.999999, r));
-  const z = Math.atanh(bounded);
+  // atanh(±1) diverges. Clamping r to something like ±0.999999 and carrying on
+  // produces an interval whose width is set by the clamp, not by the data: a
+  // perfect rank correlation over eleven launches would report a 95% interval
+  // of [0.999996, 0.9999997]. That is fabricated precision — a perfectly
+  // monotone sample of eleven points is entirely consistent with a much weaker
+  // population relationship. There is no interval to report here, so report none.
+  if (!Number.isFinite(r) || Math.abs(r) >= 1) return { lower: null, upper: null };
+  const z = Math.atanh(r);
   const se = 1 / Math.sqrt(n - 3);
   return { lower: Math.tanh(z - 1.959963985 * se), upper: Math.tanh(z + 1.959963985 * se) };
 }

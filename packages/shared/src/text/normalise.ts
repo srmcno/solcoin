@@ -20,17 +20,30 @@ export function normalise(input: string): string {
  * `PEPE`, `p3p3`, `p-e-p-e` and `рере` (Cyrillic homoglyphs) all fold together.
  */
 export function confusableFold(input: string): string {
-  const homoglyphs: Record<string, string> = {
-    а: 'a', в: 'b', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x',
-    ᴀ: 'a', ʙ: 'b', ᴄ: 'c', ᴅ: 'd', ᴇ: 'e', ɢ: 'g', ɪ: 'i', ᴊ: 'j', ᴋ: 'k', ʟ: 'l', ᴍ: 'm',
-    ɴ: 'n', ᴏ: 'o', ᴘ: 'p', ʀ: 'r', ѕ: 's', ᴛ: 't', ᴜ: 'u', ᴠ: 'v', ᴡ: 'w', ʏ: 'y', ᴢ: 'z',
-  };
-  let s = normalise(input);
-  s = [...s].map((ch) => homoglyphs[ch] ?? LEET_MAP[ch] ?? ch).join('');
+  let s = deleetFold(input);
   s = s.replace(/[^a-z0-9]+/g, '');
   // Collapse runs of a repeated character ("pepeee" -> "pepe").
   s = s.replace(/(.)\1{1,}/g, '$1');
   return s;
+}
+
+const HOMOGLYPHS: Record<string, string> = {
+  а: 'a', в: 'b', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x',
+  ᴀ: 'a', ʙ: 'b', ᴄ: 'c', ᴅ: 'd', ᴇ: 'e', ɢ: 'g', ɪ: 'i', ᴊ: 'j', ᴋ: 'k', ʟ: 'l', ᴍ: 'm',
+  ɴ: 'n', ᴏ: 'o', ᴘ: 'p', ʀ: 'r', ѕ: 's', ᴛ: 't', ᴜ: 'u', ᴠ: 'v', ᴡ: 'w', ʏ: 'y', ᴢ: 'z',
+};
+
+/**
+ * Undo leetspeak and homoglyph substitution while PRESERVING word structure.
+ *
+ * `confusableFold` strips punctuation and whitespace, which makes it useless
+ * for any rule that relies on word boundaries. Content screening needs both:
+ * the leet mapping so `r3t4rd` is caught, and the spaces so a rule matching a
+ * whole word does not fire on a substring of an innocent one.
+ */
+export function deleetFold(input: string): string {
+  const s = normalise(input);
+  return [...s].map((ch) => HOMOGLYPHS[ch] ?? LEET_MAP[ch] ?? ch).join('');
 }
 
 export function tokenise(input: string): string[] {

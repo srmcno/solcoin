@@ -52,14 +52,24 @@ export const INJECTION_QUARANTINE_THRESHOLD = 0.6;
 export function detectInjection(text: string): InjectionDetection {
   const matches: InjectionDetection['matches'] = [];
   let acc = 0;
+  let strongest = 0;
   for (const { pattern, weight, label } of INJECTION_PATTERNS) {
     const m = text.match(pattern);
     if (!m) continue;
     matches.push({ label, matched: m[0].slice(0, 120), weight });
     acc += weight;
+    if (weight > strongest) strongest = weight;
   }
-  // Saturating combination so three weak hits do not exceed one decisive hit.
-  const score = acc > 0 ? Math.min(1, acc / (acc + 1.1)) : 0;
+  if (acc === 0) return { score: 0, matches, quarantine: false };
+
+  // Two combination rules, taking whichever is higher:
+  //   - the strongest single pattern, so one decisive hit (an explicit
+  //     instruction override, a funds-exfiltration request, a concealment
+  //     demand) quarantines on its own; and
+  //   - a saturating sum, so several weak signals together can also reach the
+  //     threshold without any three of them exceeding one decisive hit.
+  const saturated = acc / (acc + 1.1);
+  const score = Math.min(1, Math.max(strongest, saturated));
   return { score, matches, quarantine: score >= INJECTION_QUARANTINE_THRESHOLD };
 }
 

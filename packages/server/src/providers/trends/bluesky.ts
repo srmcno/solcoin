@@ -62,6 +62,15 @@ const MAX_SEARCH_LIMIT = 100;
 const DEFAULT_CACHE_TTL_MS = 120_000;
 
 /**
+ * How long a 401/403 on searchPosts suppresses further lookups.
+ *
+ * Long enough that a persistent edge block costs one wasted request per hour
+ * instead of one per measure() call, short enough that the provider recovers on
+ * its own if the block is lifted.
+ */
+const SEARCH_BLOCK_COOLDOWN_MS = 60 * 60_000;
+
+/**
  * Posts/hour at which engagement saturates to ~0.5.
  *
  * Chosen from the observed sample: topics ranged from ~170 to ~4000 posts over
@@ -87,8 +96,15 @@ export function createBlueskyProvider(deps: BlueskyProviderOptions = {}): TrendP
   const baseUrl = (deps.baseUrl ?? APPVIEW_BASE).replace(/\/+$/, '');
 
   const stats: { lastSuccessAt?: number; lastFailureAt?: number; lastError?: string } = {};
-  /** Set once searchPosts is observed to be edge-blocked, so we stop retrying it. */
-  let searchForbidden = false;
+  /**
+   * Set when searchPosts is observed to be edge-blocked, so we stop retrying it
+   * on every lookup. The block is a CDN/edge policy rather than a property of
+   * the query, so it is latched — but only until `searchBlockedUntil`, because
+   * an edge policy can be lifted and a process that lives for weeks must not
+   * disable measure() forever on the strength of one response.
+   */
+  let searchBlockedUntil = 0;
+  const searchBlocked = (): boolean => clock.now() < searchBlockedUntil;
 
   const http =
     deps.http ??
@@ -133,8 +149,9 @@ export function createBlueskyProvider(deps: BlueskyProviderOptions = {}): TrendP
       };
 
       try {
-        // limit=1 is the cheapest form of the same call discover() makes, and
-        // shares its response cache.
+        // limit=1 is the cheapest form of the same call discover() makes. It
+        // is a distinct URL, so it has its own cache entry rather than sharing
+        // discover()'s — the point is that the probe itself costs one row.
         const payload = await getTrends(1);
         const trends = readTrendArray(payload);
         const latencyMs = clock.now() - started;
@@ -143,8 +160,8 @@ export function createBlueskyProvider(deps: BlueskyProviderOptions = {}): TrendP
           state: trends.length > 0 ? 'ok' : 'degraded',
           detail:
             trends.length > 0
-              ? searchForbidden
-                ? 'getTrends reachable; searchPosts blocked upstream (measure disabled)'
+              ? searchBlocked()
+                ? 'getTrends reachable; searchPosts blocked upstream (measure disabled until retry window)'
                 : 'getTrends reachable'
               : 'getTrends responded but returned no trends',
           latencyMs,
@@ -187,9 +204,9 @@ export function createBlueskyProvider(deps: BlueskyProviderOptions = {}): TrendP
     async measure(term: string, options: { signal?: AbortSignal }): Promise<RawTrendSignal | null> {
       const q = term.trim();
       if (!q) return null;
-      // Once the edge has refused searchPosts there is nothing to retry: the
-      // block is per-caller, not per-query.
-      if (searchForbidden) return null;
+      // Once the edge has refused searchPosts there is nothing to retry inside
+      // the cooldown: the block is per-caller, not per-query.
+      if (searchBlocked()) return null;
 
       let payload: unknown;
       try {
@@ -201,16 +218,19 @@ export function createBlueskyProvider(deps: BlueskyProviderOptions = {}): TrendP
         });
       } catch (e) {
         if (e instanceof HttpError && (e.status === 403 || e.status === 401)) {
-          searchForbidden = true;
+          searchBlockedUntil = clock.now() + SEARCH_BLOCK_COOLDOWN_MS;
           log.warn(
-            { status: e.status },
-            'bluesky searchPosts refused by the AppView edge; measure() disabled for this process',
+            { status: e.status, retryAfterMs: SEARCH_BLOCK_COOLDOWN_MS },
+            'bluesky searchPosts refused by the AppView edge; measure() disabled until the cooldown expires',
           );
           return null;
         }
-        // Anything else (400 on a malformed query, 404) is also a "cannot
-        // measure" answer, not a provider outage worth failing a job over.
-        if (e instanceof HttpError && e.status < 500) {
+        // A 4xx that is not retryable (400 on a malformed query, 404) is a
+        // "cannot measure" answer, not a provider outage worth failing a job
+        // over. A 429 or 408 is neither: the client already exhausted its
+        // retries, and reporting "no data" for a term we were throttled on
+        // would be a fabricated measurement, so those propagate.
+        if (e instanceof HttpError && e.status < 500 && !e.retryable) {
           log.debug({ status: e.status, err: safeErrorText(e, 160) }, 'bluesky searchPosts rejected query');
           return null;
         }

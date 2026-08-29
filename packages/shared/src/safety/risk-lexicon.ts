@@ -1,5 +1,5 @@
 import type { RiskFlag } from '../domain/enums.js';
-import { normalise } from '../text/normalise.js';
+import { deleetFold, normalise } from '../text/normalise.js';
 
 /**
  * Deterministic pre-screen for concept risk.
@@ -159,14 +159,19 @@ export interface RiskScreenResult {
 export function screenRisk(...texts: Array<string | undefined>): RiskScreenResult {
   const haystack = texts.filter(Boolean).join('\n');
   const normalised = normalise(haystack);
+  // Leet and homoglyph substitution is the standard evasion, so every
+  // case-insensitive rule is additionally run against a de-obfuscated copy that
+  // preserves word structure. Screening only the raw text would let `r3t4rd`
+  // and Cyrillic lookalikes straight through.
+  const deleeted = deleetFold(haystack);
   const flags: RiskScreenResult['flags'] = [];
   const seen = new Set<string>();
 
   for (const rule of RISK_RULES) {
-    // Run case-sensitive rules against the original text, others against the
-    // normalised form so that leetspeak and casing tricks do not evade them.
-    const target = rule.test.flags.includes('i') ? normalised : haystack;
-    const match = target.match(rule.test);
+    // Case-sensitive rules (the proper-noun heuristic) need the original text;
+    // everything else is screened against both normalised forms.
+    const targets = rule.test.flags.includes('i') ? [normalised, deleeted] : [haystack];
+    const match = targets.map((t) => t.match(rule.test)).find(Boolean);
     if (!match) continue;
     const key = `${rule.flag}:${rule.label}`;
     if (seen.has(key)) continue;
