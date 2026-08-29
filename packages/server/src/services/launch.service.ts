@@ -550,6 +550,37 @@ export class LaunchService {
   }
 
   /**
+   * Restore candidates stranded in `launching` with nothing behind them.
+   *
+   * `launchApproved` marks the concept `launching` before it claims the launch
+   * row. A process that dies in that gap leaves a concept in a status nothing
+   * acts on: the launch queue only selects `approved`, the recovery job only
+   * scans `launches`, and the expiry sweep deliberately skips `launching` so it
+   * cannot expire something mid-flight. The candidate is simply gone.
+   *
+   * Only concepts with *no* launch row at all are restored. A row in any state
+   * means an attempt was claimed, and that attempt — not this sweep — decides
+   * what happens next; restoring a concept whose transaction may still land is
+   * how a second token gets minted.
+   */
+  restoreStrandedCandidates(options: { olderThanMs?: number } = {}): number {
+    const cutoff = this.now() - (options.olderThanMs ?? 10 * 60_000);
+    const restored = this.db.$raw
+      .prepare(
+        `UPDATE concepts
+            SET status = 'approved', updated_at = ?
+          WHERE status = 'launching'
+            AND updated_at < ?
+            AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.concept_id = concepts.id)`,
+      )
+      .run(this.now(), cutoff).changes;
+    if (restored > 0) {
+      this.log.warn({ restored }, 'restored candidates left mid-launch by a process that stopped before claiming one');
+    }
+    return restored;
+  }
+
+  /**
    * Resolve a launch that was broadcast but never confirmed.
    *
    * Called by the recovery job. Marks the launch confirmed if the mint now

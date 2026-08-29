@@ -272,3 +272,53 @@ describe('outgoing transactions left pending', () => {
     expect(statusOf('wtx_reverted').status).toBe('failed');
   });
 });
+
+describe('candidates stranded mid-launch', () => {
+  const MINUTE = 60_000;
+
+  function seedLaunching(id: string, ageMs: number, withLaunchRow: boolean): void {
+    const at = harness.clock.now();
+    harness.db.$raw
+      .prepare(
+        `INSERT INTO concepts (id, name, symbol, description, status, metadata_uri, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(id, 'Concept', 'CPT', 'test', 'launching', 'https://example.invalid/m.json', at - ageMs, at - ageMs);
+    if (withLaunchRow) {
+      harness.db.$raw
+        .prepare(
+          `INSERT INTO launches (id, concept_id, idempotency_key, network, adapter, status, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?)`,
+        )
+        .run(`lch_${id}`, id, LaunchService.idempotencyKey(id, 'simulation'), 'simulation', 'simulation', 'submitted', at - ageMs, at - ageMs);
+    }
+  }
+
+  function statusOf(id: string): string {
+    return (harness.db.$raw.prepare('SELECT status FROM concepts WHERE id = ?').get(id) as { status: string }).status;
+  }
+
+  it('restores one whose launch row was never written', () => {
+    // The process died between marking the concept `launching` and claiming
+    // the launch. Nothing looks at that state: the queue selects `approved`,
+    // the recovery job scans `launches`, and the expiry sweep skips
+    // `launching` so it cannot expire something mid-flight.
+    seedLaunching('cpt_stranded', 30 * MINUTE, false);
+    expect(service().restoreStrandedCandidates()).toBe(1);
+    expect(statusOf('cpt_stranded')).toBe('approved');
+  });
+
+  it('leaves one whose launch was actually claimed', () => {
+    // A claimed attempt decides its own outcome. Restoring a concept whose
+    // transaction may still land is how a second token gets minted.
+    seedLaunching('cpt_claimed', 30 * MINUTE, true);
+    expect(service().restoreStrandedCandidates()).toBe(0);
+    expect(statusOf('cpt_claimed')).toBe('launching');
+  });
+
+  it('leaves a launch that has only just started', () => {
+    seedLaunching('cpt_inflight', 30_000, false);
+    expect(service().restoreStrandedCandidates()).toBe(0);
+    expect(statusOf('cpt_inflight')).toBe('launching');
+  });
+});

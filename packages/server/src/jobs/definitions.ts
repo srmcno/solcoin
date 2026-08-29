@@ -199,7 +199,12 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
       timeoutSeconds: 120,
       run: async () => {
         const unresolved = await container.launches.listUnresolved();
-        if (unresolved.length === 0) return { itemsProcessed: 0 };
+        // A concept marked `launching` whose launch row was never written is
+        // invisible to everything: this job scans `launches`, the queue selects
+        // `approved`, and the expiry sweep skips `launching` on purpose.
+        const restored = container.launches.restoreStrandedCandidates();
+
+        if (unresolved.length === 0) return { itemsProcessed: restored, result: { restored } };
 
         let resolved = 0;
         for (const row of unresolved) {
@@ -247,7 +252,7 @@ export function buildJobs(container: AppContainer): JobDefinition[] {
           }
           if (outcome !== 'pending') resolved++;
         }
-        return { itemsProcessed: resolved };
+        return { itemsProcessed: resolved + restored, result: { resolved, restored } };
       },
     },
 
