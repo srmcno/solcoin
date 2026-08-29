@@ -509,7 +509,7 @@ function DistributionBody({ data }: { data: Distribution }) {
         />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div>
           <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-subtle">Concentration of revenue</h3>
           <ul className="mt-3 space-y-3">
@@ -1307,7 +1307,7 @@ function ForecastPanel({ query }: { query: QueryLike<Forecast> }) {
           />
         ) : (
           <>
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {rows.map(({ key, label, scenario }) => {
                 const net = scenario?.netIncomeSol;
                 return (
@@ -1340,7 +1340,7 @@ function ForecastPanel({ query }: { query: QueryLike<Forecast> }) {
               })}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <StatTile
                 label="Launches per month"
                 value={formatNumber(data.launchesPerMonth, 1)}

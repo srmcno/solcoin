@@ -1006,7 +1006,7 @@ export function CandidateDetailPage() {
               />
             </div>
 
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-ink">Milestone probabilities</h3>
                 {milestones.length === 0 ? (
@@ -1229,7 +1229,7 @@ export function CandidateDetailPage() {
               </div>
             )}
 
-            <div className="grid gap-3 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
               {evaluations.map((evaluation, index) => (
                 <EvaluationCard key={evaluation.role ?? `reviewer-${index}`} evaluation={evaluation} />
               ))}
@@ -1414,7 +1414,7 @@ export function CandidateDetailPage() {
           </Note>
         )}
 
-        <div className="mt-4 grid gap-4 lg:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="min-w-0">
             <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Originality score</div>
             <div className="tnum mt-1 text-2xl font-semibold text-ink">{formatPercent(originalityScore, 0)}</div>

@@ -967,7 +967,7 @@ function Group({ title, description, children }: { title: string; description: s
   return (
     <Card>
       <SectionHeader title={title} description={description} />
-      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{children}</div>
+      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">{children}</div>
     </Card>
   );
 }
@@ -1079,7 +1079,7 @@ function PhaseAndAutonomyTab({
           description="How much each capability may do without a human. Four levels, applied per capability."
         />
 
-        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {AUTONOMY_LEVELS.map((level) => (
             <div key={level} className="rounded-lg border border-border bg-surface-raised px-3 py-2">
               <div className="text-xs font-semibold text-ink">{humanise(level)}</div>
@@ -1670,7 +1670,7 @@ function ResearchTab({ ctl }: { ctl: Controller }) {
 
       <Card>
         <SectionHeader title="Sources" description="Where trends come from. Breadth across genuinely different populations matters more than volume from any one." />
-        <div className="mt-4 grid gap-3">
+        <div className="mt-4 grid grid-cols-1 gap-3">
           <CheckboxGroupField
             ctl={ctl}
             path="research.enabledSources"
@@ -1694,7 +1694,7 @@ function ResearchTab({ ctl }: { ctl: Controller }) {
 
       <Card>
         <SectionHeader title="Source configuration" description="Extra inputs the operator wants watched. One entry per line." />
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
           <ListField ctl={ctl} path="research.googleTrendsRegions" label="Google Trends regions" placeholder="US" help="ISO-3166 alpha-2 region codes to sweep. Adding regions widens coverage and multiplies request volume." />
           <ListField ctl={ctl} path="research.mastodonInstances" label="Mastodon instances" placeholder="mastodon.social" help="Instances to poll. Several instances are one population, not several, so they do not add much independent evidence." />
           <ListField ctl={ctl} path="research.customSubreddits" label="Custom subreddits" placeholder="r/somewhere" help="Only used when Reddit credentials are configured." />
@@ -1723,7 +1723,7 @@ function AiTab({ ctl }: { ctl: Controller }) {
 
       <Card>
         <SectionHeader title="Evaluation panel" description="Several model roles argue a candidate before it is decided. Better decisions, more tokens spent." />
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
           <ToggleField ctl={ctl} path="ai.panelEnabled" label="Panel enabled" help="Run the multi-agent panel. Disabling it roughly halves evaluation cost and removes the adversarial check." />
           <CheckboxGroupField
             ctl={ctl}
@@ -1912,7 +1912,7 @@ function SecretsTab({ canManage }: { canManage: boolean }) {
           title="Set a credential"
           description="Values are encrypted at rest and never sent back to the browser. Only a short hint is ever displayed."
         />
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
           <div className="md:col-span-1">
             <label className="label" htmlFor="secret-key">
               Credential

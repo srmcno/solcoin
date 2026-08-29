@@ -565,7 +565,7 @@ export function TokensPage() {
               </div>
             ) : (
               <div className="mt-4 space-y-3">
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   {monitoringTiers.map((tier) => (
                     <div key={tier.tier} className="rounded-xl border border-border bg-surface-raised p-3">
                       <div className="flex items-center justify-between gap-2">

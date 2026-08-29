@@ -267,7 +267,7 @@ export function WalletPage() {
         <SetupFlow canConfigure={canConfigure} />
       ) : (
         <>
-          <div className="grid gap-4 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
             <OperatingWalletCard summary={summary} network={network} className="xl:col-span-2" />
             <TreasuryCard summary={summary} settings={settings} sweep={sweep} network={network} canTransfer={canTransfer} />
           </div>
@@ -753,7 +753,7 @@ function SetupFlow({ canConfigure }: { canConfigure: boolean }) {
         />
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-3">
         <SetupOption
           title="Create a fresh wallet"
           tone="positive"
@@ -954,7 +954,7 @@ function TransferPanel({
         description="A manual transfer out of the operating wallet. It is recorded in the audit log with your name against it."
       />
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
         <div>
           <label className="label" htmlFor="transfer-destination">
             Destination address

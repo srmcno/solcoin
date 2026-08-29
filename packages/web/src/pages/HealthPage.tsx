@@ -256,7 +256,7 @@ export function HealthPage() {
       <div className="space-y-5">
         <Skeleton className="h-9 w-56" />
         <Skeleton className="h-24 w-full" />
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 4 }, (_, i) => (
             <Skeleton key={i} className="h-24 w-full" />
           ))}
@@ -294,7 +294,7 @@ export function HealthPage() {
         emergencyStopReason={str(status.data?.emergencyStopReason)}
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="Overall"
           value={STATE_LABEL[overall] ?? humanise(overall)}
@@ -425,7 +425,7 @@ function ComponentsPanel({ components }: { components: HealthComponent[] }) {
           title="Platform"
           description="Local components. Only an essential one being down can take the whole system down."
         />
-        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {platform.length === 0 ? (
             <p className="text-sm text-ink-muted">No local components reported.</p>
           ) : (
@@ -439,7 +439,7 @@ function ComponentsPanel({ components }: { components: HealthComponent[] }) {
           title="Providers"
           description="External integrations. Each is optional; the platform degrades to the subset that is reachable."
         />
-        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {providers.length === 0 ? (
             <p className="text-sm text-ink-muted">
               No external providers are registered yet. Add a credential in Settings to bring one online.
@@ -1237,7 +1237,7 @@ function DiagnosticsPanel() {
         />
         <p className="mt-2 text-xs text-ink-subtle">Captured {formatRelative(maybeNum(data.checkedAt))}.</p>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <DiagnosticGroup title="Environment">
             <DiagnosticRow label="Node" value={str(environment.nodeVersion) || '—'} />
             <DiagnosticRow label="Platform" value={str(environment.platform) || '—'} />

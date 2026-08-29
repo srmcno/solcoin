@@ -486,7 +486,7 @@ export function TokenDetailPage() {
 
       <PredictionVsActual comparison={comparison} token={token} />
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card className="min-w-0">
           <SectionHeader
             title="Market cap and volume"
@@ -719,7 +719,7 @@ export function TokenDetailPage() {
             />
           </div>
         ) : (
-          <div className="mt-4 grid gap-5 sm:grid-cols-2">
+          <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2">
             <ConcentrationMeter
               label="Gini coefficient"
               value={gini}
@@ -861,7 +861,7 @@ export function TokenDetailPage() {
         )}
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card className="min-w-0">
           <SectionHeader
             title="Where this token came from"

@@ -363,7 +363,7 @@ export function CandidatesPage() {
 
         <div className="p-4 sm:p-5">
           {query.isLoading ? (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {Array.from({ length: 6 }, (_, i) => (
                 <Skeleton key={i} className="h-56 w-full" />
               ))}
@@ -410,7 +410,7 @@ export function CandidatesPage() {
                 </Note>
               )}
 
-              <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {candidates.map((candidate) => {
                   const flags = parseRiskFlags(candidate.riskFlags);
                   const blocking = flags.filter((f) => f.severity === 'block');

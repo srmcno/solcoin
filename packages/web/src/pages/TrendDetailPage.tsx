@@ -559,7 +559,7 @@ export function TrendDetailPage() {
         )}
       </Card>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card className="min-w-0">
           <SectionHeader
             title="Why this scored as it did"

@@ -386,7 +386,7 @@ export function FeesPage() {
         )}
       </Note>
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <DecisionPanel decision={decision} settings={settings} className="xl:col-span-2" />
         <ThresholdPanel settings={settings} />
       </div>

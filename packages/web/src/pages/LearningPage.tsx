@@ -413,7 +413,7 @@ function TrustPanel({ summary, calibrationN }: { summary?: LearningSummary; cali
         </div>
       </Card>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="Outcomes learned from"
           value={formatNumber(trainedOn)}
@@ -473,7 +473,7 @@ function TrainingOutcome({ result }: { result: TrainingResult }) {
           </Badge>
         }
       />
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <MetricSwatch label="Mean log loss before" value={before === null ? '—' : formatScore(before, 4)} tone="neutral" />
         <MetricSwatch
           label="Mean log loss after"
@@ -624,7 +624,7 @@ function CalibrationSection({
 
           <div className="mt-5 border-t border-border pt-4">
             <Tabs tabs={tabs} active={head} onChange={onHeadChange} />
-            <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+            <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
               <ReliabilityDiagram head={head} calibration={selected} />
               <div className="space-y-3">
                 <div>
@@ -1058,7 +1058,7 @@ function RevenueSection({ revenue }: { revenue?: RevenueAccuracy }) {
               <SkewRow label="Model expected" tone="text-info" summary={predicted} />
             </tbody>
           </DataTable>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
             <MetricSwatch
               label="Median miss (actual − expected)"
               value={revenue.medianErrorSol === null || revenue.medianErrorSol === undefined ? '—' : formatSol(revenue.medianErrorSol, { sign: true })}

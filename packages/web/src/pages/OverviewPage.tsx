@@ -272,7 +272,7 @@ export function OverviewPage() {
 
       {gettingStarted && <GettingStarted phase={status?.phase} />}
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">
           <SectionHeader
             title="Creator fees collected"
@@ -286,7 +286,7 @@ export function OverviewPage() {
         <Attention overview={overview} status={status} />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <ForecastPanel query={forecastQuery} />
         <RevenuePerLaunch overview={overview} />
       </div>
@@ -570,7 +570,7 @@ function OperatingStrip({
           </StripFact>
         </div>
 
-        <div className="grid w-full gap-3 sm:grid-cols-3 lg:max-w-xl">
+        <div className="grid grid-cols-1 w-full gap-3 sm:grid-cols-3 lg:max-w-xl">
           <LimitMeter
             label="Launches today"
             value={usage?.launchesToday}
@@ -1028,7 +1028,7 @@ function ForecastDetail({ forecast }: { forecast: Forecast }) {
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {scenarios.map(({ key, label }) => {
           const scenario = forecast.scenarios?.[key];
           const net = scenario?.netIncomeSol;

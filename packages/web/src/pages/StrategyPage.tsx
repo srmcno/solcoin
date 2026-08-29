@@ -420,7 +420,7 @@ function PresetsSection({ query, presets }: { query: PresetsQueryLike; presets: 
   }
 
   return (
-    <div className="grid gap-3 lg:grid-cols-3">
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
       {presets.map((preset, i) => {
         const { thesis, risk } = splitThesis(preset.description);
         return (
@@ -817,7 +817,7 @@ function ProjectionSection({
               </Note>
             </div>
           )}
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               label="Median cumulative net"
               value={median === undefined ? '—' : formatSol(median, { sign: true })}

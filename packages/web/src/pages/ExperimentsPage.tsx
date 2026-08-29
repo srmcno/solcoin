@@ -273,7 +273,7 @@ export default function ExperimentsPage() {
           />
         </Card>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-[22rem_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[22rem_minmax(0,1fr)]">
           <ExperimentList experiments={experiments} selectedId={selectedId} onSelect={setSelectedId} />
           <ResultsPanel
             experiment={selected}
@@ -430,7 +430,7 @@ function ResultsPanel({
 
         {actionError && <div className="mt-3"><Note tone="negative">{actionError.message}</Note></div>}
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatTile label="Factor varied" value={humanise(experiment.factor)} hint="The one thing that differs between arms." />
           <StatTile label="Metric" value={humanise(experiment.metric)} hint="What each arm is scored on." />
           <StatTile
@@ -652,7 +652,7 @@ function ArmCard({
         )}
       </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Success rate</div>
           <div className="tnum mt-0.5 text-sm text-ink">
@@ -1005,7 +1005,7 @@ function CreateExperimentModal({
           />
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <label className="label" htmlFor="exp-factor">
               Factor varied
@@ -1065,7 +1065,7 @@ function CreateExperimentModal({
           <div className="mt-2 space-y-3">
             {arms.map((arm, index) => (
               <div key={index} className="rounded-lg border border-border bg-surface-raised p-3">
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <div>
                     <label className="label" htmlFor={`arm-key-${index}`}>
                       Key
