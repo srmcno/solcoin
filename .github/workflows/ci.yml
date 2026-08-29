@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's result irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # better-sqlite3 ships prebuilds for the runner's platform; `npm ci`
+      # keeps the lockfile authoritative rather than resolving fresh ranges.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # The suite is offline by design: every provider is faked or runs
+      # against the simulation adapter, so a flaky network cannot redden CI.
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # A migration that does not apply to an empty database is a deploy-time
+      # failure, which is the worst time to find one.
+      - name: Migrate a fresh database
+        run: npm run db:migrate
+        env:
+          DATABASE_PATH: ./data/ci-check.db

@@ -199,9 +199,19 @@ can reach the key. Operators who need a stronger guarantee should run in
 ```bash
 npm run dev        # API with rebuild-on-change, plus the dashboard dev server
 npm run typecheck  # every package
+npm run lint       # ESLint, warnings included
 npm test           # unit, integration and end-to-end suites
 npm run doctor     # pre-flight diagnostics
 ```
+
+The test suite is offline. Every provider is either faked or pointed at the
+simulation adapter, so a slow or blocked network cannot make it fail. The
+network is exercised by `npm run doctor` instead, which is honest about which
+providers actually answered.
+
+CI runs the typecheck, the lint, the tests and a production build on every
+pull request, then applies the migrations to an empty database — a migration
+that does not apply cleanly is a deploy-time failure otherwise.
 
 The server is bundled with esbuild rather than run from loose files. This is a
 correctness requirement, not a packaging preference: several Solana packages ship
