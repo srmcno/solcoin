@@ -269,3 +269,65 @@ describe('what a claim costs', () => {
     expect(result.collected).toBe(true);
   });
 });
+
+describe('a claim that was broadcast but not confirmed', () => {
+  const withSigner = async <T>(fn: (kp: Keypair) => Promise<T>): Promise<T> =>
+    fn(Keypair.fromSeed(new Uint8Array(32).fill(13)));
+
+  beforeEach(() => {
+    harness.settings.update({ autonomy: { fee_collection: 'approve' } }, { type: 'system' });
+    (adapter as unknown as { vaults: Map<string, { curve: number; amm: number }> }).vaults.set(CREATOR, {
+      curve: solToLamports(0.5),
+      amm: 0,
+    });
+  });
+
+  function reservationRow(): { status: string; signature: string | null; error: string | null } {
+    return harness.db.$raw
+      .prepare(`SELECT status, signature, error FROM wallet_transactions WHERE purpose = 'fee_claim' ORDER BY created_at DESC LIMIT 1`)
+      .get() as { status: string; signature: string | null; error: string | null };
+  }
+
+  it('stays pending with its signature so the claim can be reconciled', async () => {
+    // Broadcast, signature reported, then the confirmation died.
+    const failing = {
+      ...adapter,
+      prepareFeeClaim: adapter.prepareFeeClaim.bind(adapter),
+      getAccruedFees: adapter.getAccruedFees.bind(adapter),
+      executeFeeClaim: async (
+        _plan: unknown,
+        _payer: unknown,
+        options: { onSigned?: (i: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void },
+      ) => {
+        await options.onSigned?.({ signature: 'Sig-claim-inflight', blockhash: 'bh', lastValidBlockHeight: 1 });
+        throw new Error('confirmation poll failed after the claim was broadcast');
+      },
+    };
+
+    await expect(service.collect(failing as never, CREATOR, withSigner, { actorType: 'user' })).rejects.toThrow();
+
+    const row = reservationRow();
+    // Calling it failed loses the claim: the SOL would arrive with no event
+    // recording where it came from and no attribution back to the tokens.
+    expect(row.status).toBe('pending');
+    expect(row.signature).toBe('Sig-claim-inflight');
+    expect(row.error).toMatch(/broadcast but unconfirmed/i);
+  });
+
+  it('releases the reservation when nothing was broadcast', async () => {
+    const failing = {
+      ...adapter,
+      prepareFeeClaim: adapter.prepareFeeClaim.bind(adapter),
+      getAccruedFees: adapter.getAccruedFees.bind(adapter),
+      executeFeeClaim: async () => {
+        throw new Error('the RPC refused the claim outright');
+      },
+    };
+
+    await expect(service.collect(failing as never, CREATOR, withSigner, { actorType: 'user' })).rejects.toThrow();
+
+    const row = reservationRow();
+    expect(row.status).toBe('failed');
+    expect(row.signature).toBeNull();
+  });
+});

@@ -358,10 +358,16 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
   async executeFeeClaim(
     plan: FeeClaimPlan,
     payer: Keypair,
-    options: { signal?: AbortSignal } = {},
+    options: {
+      signal?: AbortSignal;
+      onSigned?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => Promise<void> | void;
+    } = {},
   ): Promise<{ signature: string; slot: number; claimedLamports: number; networkFeeLamports: number; simulated: boolean }> {
     const balanceBefore = await this.options.rpc.getBalance(payer.publicKey);
-    const result = await this.options.rpc.sendTransaction(plan.instructions, payer, { signal: options.signal });
+    const result = await this.options.rpc.sendTransaction(plan.instructions, payer, {
+      signal: options.signal,
+      onSigned: options.onSigned,
+    });
     const balanceAfter = await this.options.rpc.getBalance(payer.publicKey).catch(() => balanceBefore);
 
     // The measured delta is the honest number: it already nets out the network

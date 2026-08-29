@@ -99,8 +99,22 @@ export interface LaunchAdapter {
   getAccruedFees(creator: string): Promise<AccruedFees>;
   /** Build the instructions that sweep accrued fees to the creator. */
   prepareFeeClaim(creator: string): Promise<FeeClaimPlan | null>;
-  /** Execute a prepared fee claim. */
-  executeFeeClaim(plan: FeeClaimPlan, payer: Keypair, options?: { signal?: AbortSignal }): Promise<{
+  /**
+   * Execute a prepared fee claim.
+   *
+   * `onSigned` fires before the first broadcast, for the same reason it does on
+   * a launch: a signature recorded only on success is missing in the one case
+   * it is needed, which is the transaction going out and the confirmation not
+   * coming back.
+   */
+  executeFeeClaim(
+    plan: FeeClaimPlan,
+    payer: Keypair,
+    options?: {
+      signal?: AbortSignal;
+      onSigned?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => Promise<void> | void;
+    },
+  ): Promise<{
     signature: string;
     slot: number;
     claimedLamports: number;

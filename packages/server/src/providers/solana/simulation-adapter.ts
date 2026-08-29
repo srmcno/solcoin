@@ -273,8 +273,17 @@ export class SimulationLaunchAdapter implements LaunchAdapter {
   async executeFeeClaim(
     plan: FeeClaimPlan,
     payer: Keypair,
+    options: {
+      signal?: AbortSignal;
+      onSigned?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => Promise<void> | void;
+    } = {},
   ): Promise<{ signature: string; slot: number; claimedLamports: number; networkFeeLamports: number; simulated: boolean }> {
     const creator = payer.publicKey.toBase58();
+    await options.onSigned?.({
+      signature: `SIMULATED-CLAIM-${creator.slice(0, 20)}-${this.now()}`,
+      blockhash: 'SIMULATED',
+      lastValidBlockHeight: 0,
+    });
     this.vaults.set(creator, { curve: 0, amm: 0 });
     return {
       signature: `SIMULATED-CLAIM-${creator.slice(0, 20)}-${this.now()}`,

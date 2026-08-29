@@ -365,7 +365,16 @@ export class FeeService {
     };
 
     try {
-      const result = await getSigner((payer) => adapter.executeFeeClaim(plan, payer, { signal: options.signal }));
+      const result = await getSigner((payer) =>
+        adapter.executeFeeClaim(plan, payer, {
+          signal: options.signal,
+          // Recorded before the broadcast, so a claim that goes out and then
+          // loses its confirmation can still be found and resolved.
+          onSigned: ({ signature }) => {
+            this.db.$raw.prepare('UPDATE wallet_transactions SET signature = ? WHERE id = ?').run(signature, reservationId);
+          },
+        }),
+      );
 
       this.db.$raw
         .prepare(
@@ -418,11 +427,35 @@ export class FeeService {
       );
       return { collected: true, lamports: result.claimedLamports, signature: result.signature };
     } catch (e) {
-      // A claim that never landed still paid nothing, but one that failed after
-      // broadcast may have. The estimate is the honest figure to keep until
-      // something better is known, so only the status changes.
-      reconcile(estimatedFeeLamports, 'failed');
       const message = safeErrorText(e, 400);
+
+      /*
+       * A claim that was broadcast is not a claim that failed. If it lands, the
+       * SOL arrives in the wallet with nothing recording where it came from:
+       * no `creator_fee_events` row, no attribution back to the tokens that
+       * earned it, and revenue understated on every screen that reports it.
+       *
+       * The reservation stays `pending` with its signature so the reconciler
+       * can settle it against the chain, and the next accrual snapshot will
+       * show the vault emptied.
+       */
+      const signed = this.db.$raw.prepare('SELECT signature FROM wallet_transactions WHERE id = ?').get(reservationId) as
+        | { signature: string | null }
+        | undefined;
+
+      if (signed?.signature) {
+        this.db.$raw
+          .prepare('UPDATE wallet_transactions SET error = ? WHERE id = ?')
+          .run(`Fee claim broadcast but unconfirmed: ${message}`, reservationId);
+        this.log.warn(
+          { creator, signature: signed.signature },
+          'a broadcast fee claim failed before confirmation; leaving it pending for reconciliation',
+        );
+      } else {
+        // Nothing went out, so the reservation is simply released.
+        reconcile(0, 'failed');
+      }
+
       this.audit.record({
         actorType: options.actorType ?? 'job',
         actorId: options.actorId ?? null,
