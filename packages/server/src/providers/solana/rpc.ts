@@ -102,6 +102,8 @@ export class SolanaRpc {
   private readonly clock: Clock;
   private readonly failureThreshold: number;
   private readonly benchDurationMs: number;
+  /** Probed highest-first; narrowed to the one that works on first success. */
+  private supportedTransactionVersions: number[] = [1, 0];
 
   constructor(options: SolanaRpcOptions) {
     if (options.endpoints.length === 0) {
@@ -456,12 +458,34 @@ export class SolanaRpc {
     return result.value[0] ?? null;
   }
 
+  /**
+   * Fetch a confirmed transaction's metering detail.
+   *
+   * `maxSupportedTransactionVersion` is negotiated rather than hardcoded: the
+   * network has moved beyond v0 messages, and a client pinned to 0 fails
+   * outright on a newer transaction instead of degrading. We ask for the
+   * highest version this client understands and fall back on rejection, so the
+   * platform keeps working across a version bump rather than going dark.
+   */
   async getTransactionDetail(
     signature: string,
   ): Promise<{ computeUnitsConsumed: number | null; feeLamports: number | null; slot: number } | null> {
-    const tx = await this.call('getTransaction', (c) =>
-      c.getTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }),
-    );
+    const fetchAt = (version: number) =>
+      this.call('getTransaction', (c) =>
+        c.getTransaction(signature, { maxSupportedTransactionVersion: version, commitment: 'confirmed' }),
+      );
+
+    let tx: Awaited<ReturnType<typeof fetchAt>> = null;
+    for (const version of this.supportedTransactionVersions) {
+      try {
+        tx = await fetchAt(version);
+        // Remember the version that worked so later calls skip the failed probe.
+        this.supportedTransactionVersions = [version];
+        break;
+      } catch (e) {
+        if (!/maxSupportedTransactionVersion|unsupported transaction version/i.test(safeErrorText(e, 200))) throw e;
+      }
+    }
     if (!tx) return null;
     return {
       computeUnitsConsumed: tx.meta?.computeUnitsConsumed ?? null,
