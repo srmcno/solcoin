@@ -85,6 +85,20 @@ const MIN_OBSERVED_FOR_COMPARISON = 10;
 /** Resamples used for the clustered bootstrap in strategy comparison. */
 const COMPARISON_BOOTSTRAP_DRAWS = 2000;
 
+/**
+ * Minimum number of launches the two strategies do *not* share before their
+ * difference is allowed to be called separable.
+ *
+ * The bootstrap statistic is a difference of realised *totals*, so when one
+ * strategy's launch set contains the other's the difference is just the sum of
+ * the non-shared launches and its sign barely varies across resamples. With one
+ * or two such launches the interval then excludes zero almost mechanically, and
+ * "separable" would mean nothing more than "one strategy launched one extra
+ * token that happened to earn". Below this count the strategies are reported as
+ * indistinguishable whatever the interval says.
+ */
+const MIN_EXCLUSIVE_FOR_SEPARATION = 5;
+
 /** Fixed seeds: a lab result that changes between runs is not a lab result. */
 const COMPARISON_SEED = 'backtest:compare:v1';
 const PROJECTION_SEED = 'backtest:projection:v1';
@@ -148,10 +162,22 @@ export interface SkewSummary {
   p90Sol: number;
   p99Sol: number;
   maxSol: number;
-  /** Share of the total contributed by the best 1% / 5% / 10% of launches. */
+  /**
+   * Share of the total contributed by the best 1% / 5% / 10% of launches.
+   *
+   * Below 100 observations a "top 1%" bucket cannot hold a fraction of a
+   * launch and is rounded up to one, so on this platform's sample sizes
+   * `top1PercentShare` is almost always the share of the single best launch.
+   * The matching `…Launches` count says how many observations each share
+   * actually rests on, because a share of 1.0 means something very different
+   * over 1 launch than over 100.
+   */
   top1PercentShare: number;
+  top1PercentLaunches: number;
   top5PercentShare: number;
+  top5PercentLaunches: number;
   top10PercentShare: number;
+  top10PercentLaunches: number;
   /** Concentration index; 1.0 means a single launch produced everything. */
   gini: number;
 }
@@ -228,11 +254,18 @@ export interface StrategyComparisonEntry {
   realisedNetSol: number;
   modelledNetSol: number | null;
   observedFraction: number;
+  /** The unshrunk per-launch mean actually observed. Null when nothing was. */
+  rawMeanNetPerLaunchSol: number | null;
   /**
    * Per-launch mean net shrunk toward the all-launch mean by sample size. Null
    * when this strategy has no observed launches at all: shrinkage on zero
    * observations returns the global mean unchanged, which would print a
    * plausible per-launch figure for a strategy that was never measured.
+   *
+   * This is an estimate, not a measurement, and over few launches it sits much
+   * closer to the global mean than to anything this strategy did — which is why
+   * `rawMeanNetPerLaunchSol` sits beside it. The two disagreeing in sign is the
+   * normal signal that the sample is too small to say anything.
    */
   shrunkMeanNetPerLaunchSol: number | null;
   /**
@@ -271,6 +304,14 @@ export interface ProjectionResult {
   observedLaunches: number;
   expectedLaunches: number;
   launchesPerMonth: number;
+  /**
+   * Which launches the per-launch outcomes were resampled from. `strategy` means
+   * the strategy's own selections had enough realised outcomes to stand alone;
+   * `all-observed` means they did not and the platform's whole realised history
+   * was used instead, so the projection then reflects the strategy's launch
+   * *rate* only and says nothing about the quality of its picks.
+   */
+  bootstrapPopulation: 'strategy' | 'all-observed';
   /** Cumulative net profit in SOL over the whole horizon. */
   cumulativeNetSol: { p5: number; p25: number; p50: number; p75: number; p95: number };
   probabilityNetPositive: number;
@@ -302,10 +343,14 @@ export interface SweepPoint {
   observedLaunches: number;
   realisedNetSol: number;
   observedFraction: number;
+  /** The unshrunk per-launch mean actually observed at this point. */
+  rawMeanNetPerLaunchSol: number | null;
   /**
    * Shrunk toward the global per-launch mean; a 1-launch cell is not a signal.
    * Null at a threshold that produced no observed launches, so an empty cell in
-   * the sweep never renders as a number.
+   * the sweep never renders as a number. Reported next to the raw mean because
+   * over few launches shrinkage can pull a losing cell positive, and a reader
+   * comparing the two can see that the estimate is mostly the prior.
    */
   shrunkMeanNetPerLaunchSol: number | null;
   /** True when this point rests on too few observations to mean anything. */
@@ -446,8 +491,14 @@ export class BacktestService {
     const graduations = observed.filter((c) => c.outcome!.graduated).length;
 
     const observedFractionInterval = wilsonInterval(observed.length, simulation.selected.length);
+    const perLaunch = netValues.length > 0 ? summariseSkew(netValues) : null;
 
     const caveats = [...BASE_CAVEATS];
+    if (perLaunch && perLaunch.top1PercentShare > 0.5) {
+      caveats.push(
+        `CONCENTRATED IN ${perLaunch.top1PercentLaunches} LAUNCH(ES): ${(perLaunch.top1PercentShare * 100).toFixed(0)}% of the positive realised net comes from ${perLaunch.top1PercentLaunches} of the ${perLaunch.n} observed launch(es) (gini ${perLaunch.gini.toFixed(2)}). The mean of ${perLaunch.meanSol.toFixed(4)} SOL per launch describes no launch that happened; the median of ${perLaunch.medianSol.toFixed(4)} SOL is what a typical one did.`,
+      );
+    }
     if (simulation.selected.length > 0 && observed.length === 0) {
       caveats.push(
         `NO REALISED OUTCOMES: this strategy selected ${simulation.selected.length} candidate(s) in the window and none of them was ever launched. Every realised figure below is zero because nothing was measured, not because the strategy earned nothing.`,
@@ -491,7 +542,7 @@ export class BacktestService {
       realisedFeesSol,
       realisedCostSol,
       realisedNetSol: realisedFeesSol - realisedCostSol,
-      realisedPerLaunch: netValues.length > 0 ? summariseSkew(netValues) : null,
+      realisedPerLaunch: perLaunch,
       // 1 graduation out of 3 launches is not a 33% graduation rate. The Beta
       // posterior with a weak pessimistic prior keeps that honest. With nothing
       // observed at all there is no rate to report and the field is null.
@@ -586,10 +637,21 @@ export class BacktestService {
         realisedNetSol: entry.result.realisedNetSol,
         modelledNetSol: entry.result.modelled?.modelledNetSol ?? null,
         observedFraction: entry.result.observedFraction.point,
+        rawMeanNetPerLaunchSol: observedCount > 0 ? entry.result.realisedNetSol / observedCount : null,
         // A strategy that selected two launches has a per-launch mean built from
         // two numbers; shrinking it toward the all-launch mean stops that cell
-        // from topping the table on one lucky token.
-        shrunkMeanNetPerLaunchSol: shrinkToPrior(meanNet, observedCount, globalMeanNet, MIN_OBSERVED_FOR_COMPARISON),
+        // from topping the table on one lucky token. With zero observations
+        // there is no mean to shrink, and reporting the prior would credit an
+        // unmeasured strategy with the platform's average launch.
+        shrunkMeanNetPerLaunchSol:
+          observedCount > 0
+            ? shrinkToPrior(
+                entry.result.realisedNetSol / observedCount,
+                observedCount,
+                globalMeanNet,
+                MIN_OBSERVED_FOR_COMPARISON,
+              )
+            : null,
         distinguishable: !underpowered && separation.separable,
         distinguishabilityNote: underpowered
           ? `Indistinguishable: ${observedCount} observed launch(es) here and ${referenceObserved} for the comparison strategy, against a minimum of ${MIN_OBSERVED_FOR_COMPARISON} on both sides.`
@@ -613,6 +675,8 @@ export class BacktestService {
         ...BASE_CAVEATS,
         'Strategies replayed over the same history are scored on overlapping sets of launches. Comparisons here use a clustered bootstrap that resamples launches once and re-scores every strategy on the same resample; treating the strategies as independent samples would badly overstate the significance of any difference.',
         'Ranking by realised net rewards the strategy that happened to include whichever token produced the largest fee tail. With a small observed sample this is mostly a measurement of luck.',
+        'CORRELATION, NOT CAUSATION: a strategy sitting above another in this table is associated with a higher realised total on this history. It is not established that its thresholds caused the difference. The strategies differ on many thresholds at once, they are scored on launches the live gate selected, and the outcomes were produced under market conditions that no longer hold.',
+        `Realised net is a total, not a per-launch figure: a strategy that selects more candidates accumulates more of both fees and costs. Compare shrunkMeanNetPerLaunchSol alongside it, and read the launch counts (${entries.map((e) => `${e.name}: ${e.observedLaunches} observed`).join(', ')}) before reading the ranking.`,
       ],
     };
   }
@@ -717,13 +781,13 @@ export class BacktestService {
     const draws = Math.max(200, Math.floor(options.draws));
 
     const candidates = this.loadCandidates(sinceMs, untilMs);
-    const observed = candidates.filter((c) => c.outcome !== null).map((c) => c.outcome!);
+    const allObserved = candidates.filter((c) => c.outcome !== null).map((c) => c.outcome!);
 
-    if (observed.length < MIN_OBSERVED_FOR_PROJECTION) {
+    if (allObserved.length < MIN_OBSERVED_FOR_PROJECTION) {
       return {
         sufficient: false,
-        reason: `A projection needs at least ${MIN_OBSERVED_FOR_PROJECTION} launches with realised outcomes to resample from; ${observed.length} are available. Below that the sample very likely contains either no fee tail at all or exactly one, and a bootstrap would faithfully reproduce whichever accident it was handed. No projection is offered.`,
-        n: observed.length,
+        reason: `A projection needs at least ${MIN_OBSERVED_FOR_PROJECTION} launches with realised outcomes to resample from; ${allObserved.length} are available. Below that the sample very likely contains either no fee tail at all or exactly one, and a bootstrap would faithfully reproduce whichever accident it was handed. No projection is offered.`,
+        n: allObserved.length,
         required: MIN_OBSERVED_FOR_PROJECTION,
         caveats: [...BASE_CAVEATS],
       };
@@ -733,9 +797,27 @@ export class BacktestService {
     // done over the observed history rather than from its daily cap: the cap is
     // an upper bound, and candidate supply is usually the real constraint.
     const replayForRate = this.simulate(candidates, options.strategy);
+    if (replayForRate.selected.length === 0) {
+      return {
+        sufficient: false,
+        reason: `This strategy would not have launched anything at all over the ${candidates.length} candidate(s) in the window, so there is no launch rate to project forward. A simulation would return a horizon of exactly zero SOL, which would read as a forecast when it is only a restatement that the strategy never fired. Widen the window or loosen the thresholds.`,
+        n: 0,
+        required: 1,
+        caveats: [...BASE_CAVEATS],
+      };
+    }
     const historyDays = Math.max((untilMs - (candidates[0]?.decisionAtMs ?? sinceMs)) / TIME.day, 1);
     const perDay = Math.min(replayForRate.selected.length / historyDays, options.strategy.maxLaunchesPerDay);
     const launchesPerMonth = perDay * DAYS_PER_MONTH;
+
+    // Per-launch outcomes should come from the launches *this* strategy would
+    // have made, otherwise the projection silently credits a selective strategy
+    // with the average launch of a permissive history. That subset is usually
+    // far too small to resample from, so it is used only when it clears the same
+    // bar the projection as a whole has to clear, and the fallback is declared.
+    const strategyObserved = replayForRate.selected.filter((c) => c.outcome !== null).map((c) => c.outcome!);
+    const usingStrategyPool = strategyObserved.length >= MIN_OBSERVED_FOR_PROJECTION;
+    const observed = usingStrategyPool ? strategyObserved : allObserved;
 
     const rng = createRng(`${PROJECTION_SEED}:${months}:${draws}`);
     const cumulative: number[] = new Array(draws);
@@ -762,6 +844,22 @@ export class BacktestService {
     }
 
     const netValues = cumulative.map((v) => v ?? 0);
+    const source = summariseSkew(observed.map((o) => o.netSol));
+
+    const concentrationCaveats: string[] = [];
+    if (source.top1PercentShare > 0.5) {
+      // The bootstrap can only redraw what it was given. When one launch is most
+      // of the positive total, every percentile above the median is really a
+      // statement about how often that single token gets resampled.
+      concentrationCaveats.push(
+        `RESTS ON ${source.top1PercentLaunches} LAUNCH(ES): ${(source.top1PercentShare * 100).toFixed(0)}% of the positive net in the resampled population of ${source.n} comes from its best ${source.top1PercentLaunches} launch(es) (gini ${source.gini.toFixed(2)}, median ${source.medianSol.toFixed(4)} SOL against a mean of ${source.meanSol.toFixed(4)}). The upper percentiles and probabilityNetPositive below are therefore mostly a measure of how often the bootstrap redraws that one outcome, not of how often the strategy earns. If it was a one-off, this projection is an artefact of it.`,
+      );
+    }
+    if (source.medianSol < 0 && source.meanSol > 0) {
+      concentrationCaveats.push(
+        `The typical launch in the resampled population lost money (median ${source.medianSol.toFixed(4)} SOL) and only the mean is positive (${source.meanSol.toFixed(4)} SOL). The projection is profitable only on the assumption that rare winners keep arriving at the historical rate.`,
+      );
+    }
 
     return {
       sufficient: true,
@@ -770,6 +868,7 @@ export class BacktestService {
       observedLaunches: observed.length,
       expectedLaunches: launchTotal / draws,
       launchesPerMonth,
+      bootstrapPopulation: usingStrategyPool ? 'strategy' : 'all-observed',
       cumulativeNetSol: {
         p5: quantile(netValues, 0.05),
         p25: quantile(netValues, 0.25),
@@ -778,10 +877,14 @@ export class BacktestService {
         p95: quantile(netValues, 0.95),
       },
       probabilityNetPositive: positive / draws,
-      bootstrapSource: summariseSkew(observed.map((o) => o.netSol)),
+      bootstrapSource: source,
       caveats: [
         ...BASE_CAVEATS,
+        ...concentrationCaveats,
         `The resampled population is ${observed.length} launch(es) this platform actually made. A bootstrap cannot generate an outcome better than the best one in that sample, so the p95 here is a floor on the plausible upside, not a ceiling.`,
+        usingStrategyPool
+          ? `Per-launch outcomes are resampled from the ${strategyObserved.length} observed launch(es) this strategy would itself have selected.`
+          : `Only ${strategyObserved.length} of this strategy's selections have realised outcomes, below the ${MIN_OBSERVED_FOR_PROJECTION} needed to resample from, so per-launch outcomes are drawn from all ${allObserved.length} observed launch(es) the platform made under whatever thresholds were live at the time. The projection therefore reflects this strategy's launch RATE only; it assumes the strategy's picks earn like the platform's average launch and is not evidence that its selectivity pays.`,
         'Outcomes are resampled independently across launches and months. Real launches are correlated — a strong market lifts many at once, a dead one sinks them together — so the true spread of cumulative profit is wider than the interval shown.',
         'The launch rate is extrapolated from how often this strategy found an acceptable candidate in the past. If trend supply or the candidate pipeline changes, the launch count changes with it and every figure here moves proportionally.',
         'Fees are simulated at the historical fee schedule and SOL price. Neither is fixed, and a change to either rescales the entire projection.',
@@ -816,21 +919,26 @@ export class BacktestService {
       const simulation = this.simulate(candidates, strategy);
       const observed = simulation.selected.filter((c) => c.outcome !== null);
       const realisedNetSol = observed.reduce((acc, c) => acc + c.outcome!.netSol, 0);
-      const meanNet = observed.length > 0 ? realisedNetSol / observed.length : globalMeanNet;
       const underpowered = observed.length < MIN_OBSERVED_FOR_COMPARISON;
 
       const caveats = [...BASE_CAVEATS];
       caveats.push(
         'A sweep re-uses one history at every point, so neighbouring points are not independent observations and the curve is far smoother than the underlying uncertainty. Read its shape, not its peak.',
+        'CORRELATION, NOT CAUSATION: this curve is an association between a threshold and a realised total over one already-selected history. It is not evidence that moving the threshold would cause the change shown. The candidates each point admits differ in far more than the swept parameter, and the outcomes attached to them were produced under the live gate, so the swept parameter is confounded with every other reason those tokens were launched.',
       );
-      if (underpowered) {
+      if (observed.length === 0) {
         caveats.push(
-          `Underpowered: ${observed.length} observed launch(es) at this threshold. The realised net is a sum over that handful and carries no information about the threshold itself.`,
+          `NO OBSERVED LAUNCHES at this threshold: of the ${simulation.selected.length} candidate(s) it would have selected, none was ever launched. The realised net of 0 means nothing was measured here, not that this threshold earns nothing, and the per-launch mean is reported as null rather than as a number.`,
+        );
+      } else if (underpowered) {
+        caveats.push(
+          `Underpowered: ${observed.length} observed launch(es) at this threshold, against a minimum of ${MIN_OBSERVED_FOR_COMPARISON}. The realised net is a sum over that handful and carries no reliable information about the threshold itself.`,
         );
       }
-      if (observed.length > 0 && summariseSkew(observed.map((c) => c.outcome!.netSol)).top1PercentShare > 0.5) {
+      const skew = observed.length > 0 ? summariseSkew(observed.map((c) => c.outcome!.netSol)) : null;
+      if (skew && skew.top1PercentShare > 0.5) {
         caveats.push(
-          'More than half of the realised net at this point comes from the single best launch. Moving the threshold past that one token would collapse the figure entirely.',
+          `${(skew.top1PercentShare * 100).toFixed(0)}% of the realised net at this point comes from ${skew.top1PercentLaunches} of its ${skew.n} observed launch(es). Moving the threshold past that handful would collapse the figure entirely, so this point measures one token, not the threshold.`,
         );
       }
 
@@ -840,7 +948,16 @@ export class BacktestService {
         observedLaunches: observed.length,
         realisedNetSol,
         observedFraction: simulation.selected.length > 0 ? observed.length / simulation.selected.length : 0,
-        shrunkMeanNetPerLaunchSol: shrinkToPrior(meanNet, observed.length, globalMeanNet, MIN_OBSERVED_FOR_COMPARISON),
+        rawMeanNetPerLaunchSol: observed.length > 0 ? realisedNetSol / observed.length : null,
+        shrunkMeanNetPerLaunchSol:
+          observed.length > 0
+            ? shrinkToPrior(
+                realisedNetSol / observed.length,
+                observed.length,
+                globalMeanNet,
+                MIN_OBSERVED_FOR_COMPARISON,
+              )
+            : null,
         underpowered,
         caveats,
       });
@@ -1137,14 +1254,21 @@ export class BacktestService {
     // than reporting a partial total that reads like a complete one.
     const extrapolated = scored.length > 0 && scored.length < unobserved.length;
     const scale = scored.length > 0 ? unobserved.length / scored.length : 0;
-    const modelledFeesSol = feesSum * scale;
-    const modelledMedianFeesSol = medians.length > 0 ? median(medians) * unobserved.length : 0;
+    // Nothing scorable means no modelled figure exists. Zero is not the answer
+    // to "what would the model have expected" — there is no answer.
+    const modelledFeesSol = scored.length > 0 ? feesSum * scale : null;
+    const modelledMedianFeesSol = medians.length > 0 ? median(medians) * unobserved.length : null;
     const modelledCostSol = unobserved.length * (DEFAULT_ECONOMICS.launchCostSol + DEFAULT_ECONOMICS.candidateCostSol);
 
     const caveats = [...MODELLED_CAVEATS];
-    if (scorable.length < unobserved.length) {
+    if (scored.length === 0) {
       caveats.push(
-        `${unobserved.length - scorable.length} unobserved candidate(s) had no usable stored feature vector and could not be scored at all; the totals here are scaled from the ${scorable.length} that could.`,
+        `INSUFFICIENT DATA TO MODEL: none of the ${unobserved.length} unobserved candidate(s) carried a stored feature vector the model could read, so no fee figure could be produced for them at all. Fees and net are reported as null rather than zero; only the cost, which follows from the launch count alone, is a real number.`,
+      );
+    }
+    if (scorable.length < unobserved.length && scorable.length > 0) {
+      caveats.push(
+        `${unobserved.length - scorable.length} of ${unobserved.length} unobserved candidate(s) had no usable stored feature vector and could not be scored; the totals here are the ${scorable.length} that could, scaled up to the full count on the assumption that the unscorable ones resemble them.`,
       );
     }
     if (extrapolated) {
@@ -1157,9 +1281,16 @@ export class BacktestService {
         `The model has seen ${bundle.trainedOn} labelled outcome(s). At that sample size its predictions are essentially the hand-written domain priors it was seeded with, so this block is closer to an assumption than to a measurement.`,
       );
     }
-    caveats.push(
-      `The modelled mean is far above the modelled median (${modelledFeesSol.toFixed(4)} vs ${modelledMedianFeesSol.toFixed(4)} SOL in total) because fee outcomes are tail-driven. The median is what a typical candidate would have produced; the mean assumes the tail arrives on schedule.`,
-    );
+    if (modelledFeesSol !== null && modelledMedianFeesSol !== null) {
+      // Stated as a comparison rather than asserted: on a sample where the tail
+      // happens not to show up the mean can sit at or below the median, and a
+      // hardcoded "the mean is far above the median" would then be false.
+      caveats.push(
+        modelledFeesSol > modelledMedianFeesSol
+          ? `The modelled mean total (${modelledFeesSol.toFixed(4)} SOL) exceeds the modelled median total (${modelledMedianFeesSol.toFixed(4)} SOL) because fee outcomes are tail-driven. The median is what a typical candidate would have produced; the mean assumes the tail arrives on schedule.`
+          : `The modelled mean total (${modelledFeesSol.toFixed(4)} SOL) is not above the modelled median total (${modelledMedianFeesSol.toFixed(4)} SOL). For a tail-driven quantity that usually means this candidate set contains no modelled tail at all, which is a statement about these candidates and not a reason to trust the figure more.`,
+      );
+    }
 
     return {
       label: 'MODELLED — no outcome was observed for these candidates',
@@ -1171,7 +1302,7 @@ export class BacktestService {
       modelledFeesSol,
       modelledMedianFeesSol,
       modelledCostSol,
-      modelledNetSol: modelledFeesSol - modelledCostSol,
+      modelledNetSol: modelledFeesSol === null ? null : modelledFeesSol - modelledCostSol,
       caveats,
     };
   }
@@ -1199,6 +1330,12 @@ export class BacktestService {
       return {
         separable: false,
         note: 'The two strategies selected the same observed launches, so no realised evidence distinguishes them. Any difference in the table comes from unobserved candidates, which have no outcomes.',
+      };
+    }
+    if (exclusive < MIN_EXCLUSIVE_FOR_SEPARATION) {
+      return {
+        separable: false,
+        note: `Indistinguishable: the two strategies differ on only ${exclusive} observed launch(es), against a minimum of ${MIN_EXCLUSIVE_FOR_SEPARATION}. Every launch they share cancels out of the comparison, so whatever gap the table shows rests on those ${exclusive} token(s) and is a measurement of which strategy caught a tail, not of which strategy is better.`,
       };
     }
 
@@ -1262,10 +1399,23 @@ function summariseSkew(values: readonly number[]): SkewSummary {
     p99Sol: quantile(values, 0.99),
     maxSol: values.length > 0 ? Math.max(...values) : 0,
     top1PercentShare: topShare(magnitudes, 0.01),
+    top1PercentLaunches: tailBucketSize(values.length, 0.01),
     top5PercentShare: topShare(magnitudes, 0.05),
+    top5PercentLaunches: tailBucketSize(values.length, 0.05),
     top10PercentShare: topShare(magnitudes, 0.1),
+    top10PercentLaunches: tailBucketSize(values.length, 0.1),
     gini: gini(magnitudes),
   };
+}
+
+/**
+ * How many observations a top-`frac` bucket actually contains. Mirrors the
+ * rounding inside `topShare`, so the reported count is the one the share was
+ * computed over rather than a recomputation that could drift from it.
+ */
+function tailBucketSize(n: number, frac: number): number {
+  if (n <= 0) return 0;
+  return Math.max(1, Math.ceil(frac * n));
 }
 
 /** UTC calendar day, which is the boundary the live daily launch cap uses. */

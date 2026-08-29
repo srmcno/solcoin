@@ -234,11 +234,19 @@ export function createOpenAiProvider(deps: OpenAiProviderDeps): OpenAiAiProvider
   };
 
   /**
-   * Parameters this endpoint has rejected during this process's lifetime.
-   * Learned once from a 400 and then respected, so the repair costs at most one
-   * wasted request per parameter per process — not one per call.
+   * Parameters a given model has rejected during this process's lifetime,
+   * keyed `model:param`. Learned once from a 400 and then respected, so the
+   * repair costs at most one wasted request per parameter per model — not one
+   * per call.
+   *
+   * Keyed by model rather than globally on purpose: support differs sharply
+   * across the catalogue (reasoning models reject `temperature` outright while
+   * the chat models require it), so a single global flag would let one 400 on
+   * one model silently strip the parameter from every other model's requests
+   * for the rest of the process.
    */
-  const unsupported = new Set<RepairableParam>();
+  const unsupported = new Set<string>();
+  const rejects = (model: string, param: RepairableParam): boolean => unsupported.has(`${model}:${param}`);
 
   const http =
     deps.http ??
@@ -293,7 +301,7 @@ export function createOpenAiProvider(deps: OpenAiProviderDeps): OpenAiAiProvider
       ],
     };
 
-    if (!unsupported.has('max_completion_tokens')) {
+    if (!rejects(model, 'max_completion_tokens')) {
       body.max_completion_tokens = Math.max(1, Math.floor(request.maxOutputTokens));
     } else {
       // The legacy name. Reasoning models reject it and older deployments only
@@ -301,17 +309,17 @@ export function createOpenAiProvider(deps: OpenAiProviderDeps): OpenAiAiProvider
       body.max_tokens = Math.max(1, Math.floor(request.maxOutputTokens));
     }
 
-    if (typeof request.temperature === 'number' && !unsupported.has('temperature')) {
+    if (typeof request.temperature === 'number' && !rejects(model, 'temperature')) {
       body.temperature = Math.min(2, Math.max(0, request.temperature));
     }
 
-    if (request.responseSchema && !unsupported.has('response_format')) {
+    if (request.responseSchema && !rejects(model, 'response_format')) {
       body.response_format = {
         type: 'json_schema',
         json_schema: {
           name: SCHEMA_NAME,
           strict: true,
-          schema: toStrictSchema(request.responseSchema),
+          schema: toStrictSchema(request.responseSchema).schema,
         },
       };
     } else if (request.responseSchema) {
@@ -349,7 +357,7 @@ export function createOpenAiProvider(deps: OpenAiProviderDeps): OpenAiAiProvider
 
       // Exactly one repair attempt: remember the rejected parameter and retry
       // without it. A second failure surfaces to the caller.
-      unsupported.add(repaired);
+      unsupported.add(`${model}:${repaired}`);
       log.warn({ model, param: repaired }, 'OpenAI rejected a request parameter; retrying once without it');
       if (repaired === 'response_format') stats.schemaFallbacks++;
       try {
@@ -369,13 +377,18 @@ export function createOpenAiProvider(deps: OpenAiProviderDeps): OpenAiAiProvider
 
     let parsed: unknown;
     if (request.responseSchema && text) {
+      // Unwrap only what was wrapped. `toStrictSchema` wraps a non-object root
+      // for the strict path; the prose fallback below asks for the caller's
+      // object as-is, so unwrapping there would discard the answer.
+      const identity = (value: unknown): unknown => value;
+      const unwrap = rejects(model, 'response_format') ? identity : toStrictSchema(request.responseSchema).unwrap;
       try {
-        parsed = JSON.parse(text);
+        parsed = unwrap(JSON.parse(text));
       } catch {
         // strict json_schema should make this unreachable; it is reachable
         // whenever the schema path was dropped or the model was cut off.
         const scraped = extractJsonObject(text);
-        if (scraped !== null) parsed = scraped;
+        if (scraped !== null) parsed = unwrap(scraped);
         stats.schemaFallbacks++;
         log.warn(
           { model, purpose: request.purpose, recovered: scraped !== null, finishReason },
@@ -725,13 +738,33 @@ export function createOpenAiImageProvider(deps: OpenAiImageProviderDeps): ImageP
 
 /**
  * OpenAI's `strict: true` mode requires every object to set
- * `additionalProperties: false` and to list every property in `required`.
- * Schemas written for Anthropic routinely do neither, so they are normalised
- * here rather than rejected — a 400 on schema shape is otherwise indistinguishable
- * from a 400 on model capability.
+ * `additionalProperties: false` and to list every property in `required`, and
+ * requires the root itself to be an object. Schemas written for Anthropic
+ * routinely do neither, so they are normalised here rather than rejected — a
+ * 400 on schema shape is otherwise indistinguishable from a 400 on model
+ * capability, and the repair path would respond by disabling strict schemas for
+ * that model entirely.
+ *
+ * A non-object root is wrapped in a single-property object and unwrapped again
+ * on the way out, which is exactly what the Anthropic adapter does. The two
+ * vendors must accept the same schema for the router's fallback between them to
+ * mean anything.
  */
-function toStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  return strictify(schema) as Record<string, unknown>;
+function toStrictSchema(schema: Record<string, unknown>): {
+  schema: Record<string, unknown>;
+  unwrap: (parsed: unknown) => unknown;
+} {
+  const isObjectRoot = schema.type === 'object' || (schema.properties !== undefined && schema.type === undefined);
+  if (isObjectRoot) {
+    return { schema: strictify(schema) as Record<string, unknown>, unwrap: (parsed) => parsed };
+  }
+  return {
+    schema: strictify({ type: 'object', properties: { result: schema }, required: ['result'] }) as Record<
+      string,
+      unknown
+    >,
+    unwrap: (parsed) => (isRecord(parsed) ? parsed.result : undefined),
+  };
 }
 
 function strictify(node: unknown): unknown {

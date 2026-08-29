@@ -3,7 +3,7 @@ import type { HealthState, TrendSourceId } from '@solcoin/shared';
 import { systemClock, type Clock } from '../../core/clock.js';
 import { safeErrorText } from '../../core/errors.js';
 import { componentLogger } from '../../core/logger.js';
-import { HttpClient } from '../http.js';
+import { HttpClient, HttpError } from '../http.js';
 import type { ProviderStatus, RawTrendSignal, TrendProvider } from '../types.js';
 
 /**
@@ -42,9 +42,20 @@ import type { ProviderStatus, RawTrendSignal, TrendProvider } from '../types.js'
  * empty result — a GDELT outage must never propagate as an exception, because
  * the platform is expected to run fine without it.
  *
- * GDELT also answers over-quota and malformed-query requests with a **plain
- * text** body and HTTP 200, so responses are fetched as text and parsed here
- * rather than trusting the transport's JSON path.
+ * GDELT also answers failures with a **plain text** body rather than JSON, so
+ * responses are fetched as text and parsed here rather than trusting the
+ * transport's JSON path. The two failure bodies were captured live (over port
+ * 80, which this sandbox can reach) and they differ in status:
+ *
+ *   - a **malformed query** returns **HTTP 200** with e.g. `Your search
+ *     contained a keyword that was too short.` — the transport sees a success,
+ *     so only `parseGdeltBody` can catch it;
+ *   - **throttling** returns **HTTP 429** with `Please limit requests to one
+ *     every 5 seconds …` — the transport raises `HttpError` and never reaches
+ *     `parseGdeltBody`, so the 429 is caught explicitly below.
+ *
+ * Both are handled, because the distinction drives the health state: a throttle
+ * is a live host asking us to slow down (`degraded`), an unreachable one is not.
  */
 
 const SOURCE: TrendSourceId = 'gdelt';
@@ -72,6 +83,19 @@ const RATE_LIMIT = { requests: 12, intervalMs: 60_000, burst: 2 } as const;
  * 5-second throttle.
  */
 const CACHE_TTL_MS = 10 * 60_000;
+
+/**
+ * How long to stop calling GDELT after it has told us we are over its rate.
+ *
+ * The stated limit is one request every five seconds; being throttled means we
+ * already exceeded it, and the transport's retry ladder (sub-second jitter)
+ * lands every retry back inside the same five-second window. A `discover` pass
+ * measures several terms in sequence, so without a cooldown one throttle turns
+ * into a burst of guaranteed-throttled follow-ups against a host that just
+ * asked us to back off. Thirty seconds clears the window several times over
+ * while still allowing the next scheduler tick through.
+ */
+const THROTTLE_COOLDOWN_MS = 30_000;
 
 /**
  * Spans DOC 2.0 accepts. The API keeps a **rolling three-month window** and
@@ -249,6 +273,25 @@ function parseArticles(payload: unknown): GdeltArticle[] {
   return out;
 }
 
+function tally(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+/**
+ * Most frequent keys first.
+ *
+ * A "top domains" list built from insertion order would just be the ten most
+ * recently published articles, which says nothing about who is carrying the
+ * story. Names are sanitised because `domain` and `sourcecountry` are strings
+ * chosen by the publisher, not values from a closed vocabulary.
+ */
+function topByCount(counts: Map<string, number>, n: number): string[] {
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, n)
+    .map(([key]) => sanitiseExternalText(key, 80));
+}
+
 type GdeltPayload = { ok: true; value: unknown } | { ok: false; reason: string; throttled: boolean };
 
 /**
@@ -303,6 +346,16 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
   let lastFailureAt: number | undefined;
   let lastError: string | undefined;
   let lastThrottledAt: number | undefined;
+  /** Epoch ms before which GDELT has told us not to call again. */
+  let throttledUntil = 0;
+
+  function recordThrottle(reason: string): void {
+    const now = clock.now();
+    lastFailureAt = now;
+    lastThrottledAt = now;
+    lastError = reason;
+    throttledUntil = now + THROTTLE_COOLDOWN_MS;
+  }
 
   async function fetchMode(
     mode: 'timelinevol' | 'artlist',
@@ -310,6 +363,11 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
     extra: Record<string, string | number>,
     signal?: AbortSignal,
   ): Promise<unknown> {
+    if (clock.now() < throttledUntil) {
+      log.debug({ mode, untilMs: throttledUntil }, 'skipping gdelt request during throttle cooldown');
+      return null;
+    }
+
     try {
       const text = await client.request<string>(DOC_PATH, {
         responseType: 'text',
@@ -318,18 +376,32 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
       });
       const parsed = parseGdeltBody(text);
       if (!parsed.ok) {
-        lastFailureAt = clock.now();
-        lastError = parsed.reason;
-        if (parsed.throttled) lastThrottledAt = clock.now();
+        // The 200-with-text path in practice means a malformed query; the
+        // throttle check stays because the body is the only thing that
+        // distinguishes them and GDELT is free to change the status again.
+        if (parsed.throttled) recordThrottle(parsed.reason);
+        else {
+          lastFailureAt = clock.now();
+          lastError = parsed.reason;
+        }
         log.warn({ mode, throttled: parsed.throttled, reason: parsed.reason }, 'gdelt returned a non-JSON body');
         return null;
       }
       lastSuccessAt = clock.now();
       return parsed.value;
     } catch (e) {
-      // The common failure is a TLS/connection reset, which HttpClient has
-      // already normalised into a retryable AppError. Swallow it: an
-      // unreachable GDELT is an expected operating condition.
+      // Throttling arrives as HTTP 429 with the explanation in the body, so the
+      // transport raises before `parseGdeltBody` ever runs. Read it here rather
+      // than reporting the host as unreachable: a host that answers is up.
+      if (e instanceof HttpError && e.status === 429) {
+        const reason = e.bodyText.trim().slice(0, 200) || 'rate limited (HTTP 429)';
+        recordThrottle(reason);
+        log.warn({ mode, reason }, 'gdelt throttled the request');
+        return null;
+      }
+      // Otherwise the common failure is a TLS/connection reset, which
+      // HttpClient has already normalised into a retryable AppError. Swallow
+      // it: an unreachable GDELT is an expected operating condition.
       lastFailureAt = clock.now();
       lastError = safeErrorText(e, 200);
       log.warn({ mode, err: lastError }, 'gdelt request failed');
@@ -370,12 +442,12 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
     );
     const articles = parseArticles(articlesPayload);
 
-    const domains = new Set<string>();
-    const countries = new Set<string>();
+    const domains = new Map<string, number>();
+    const countries = new Map<string, number>();
     const languages = new Set<string>();
     for (const a of articles) {
-      if (a.domain) domains.add(a.domain.toLowerCase());
-      if (a.country) countries.add(a.country);
+      if (a.domain) tally(domains, a.domain.toLowerCase());
+      if (a.country) tally(countries, a.country);
       if (a.language) languages.add(a.language);
     }
 
@@ -395,7 +467,10 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
       rawValue,
       history,
       observedAt,
-      keywords: [term.toLowerCase()],
+      // Seed terms are harvested from the discovery providers, i.e. from
+      // stranger-authored text, so the keyword is sanitised and bounded like
+      // any other external string rather than passed through raw.
+      keywords: [sanitiseExternalText(term.toLowerCase(), 120)],
       metadata: {
         query,
         timespan,
@@ -412,8 +487,8 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
         distinctDomains: domains.size,
         distinctCountries: countries.size,
         distinctLanguages: languages.size,
-        topDomains: [...domains].slice(0, 10),
-        topCountries: [...countries].slice(0, 10),
+        topDomains: topByCount(domains, 10),
+        topCountries: topByCount(countries, 10),
       },
     };
 
@@ -470,11 +545,13 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
       const payload = await fetchMode('timelinevol', 'climate', {}, undefined);
       const reachable = parseTimeline(payload).length > 0;
 
-      let state: HealthState;
-      if (reachable) state = 'ok';
       // A throttle is a live host telling us to slow down, which is materially
       // different from an unreachable one.
-      else if (lastThrottledAt !== undefined && clock.now() - lastThrottledAt < 10 * 60_000) state = 'degraded';
+      const throttled = lastThrottledAt !== undefined && clock.now() - lastThrottledAt < 10 * 60_000;
+
+      let state: HealthState;
+      if (reachable) state = 'ok';
+      else if (throttled) state = 'degraded';
       else state = 'down';
 
       const seeded = deps.seedTerms !== undefined;
@@ -487,7 +564,9 @@ export function createGdeltProvider(deps: GdeltProviderDeps = {}): TrendProvider
           ? seeded
             ? 'DOC 2.0 reachable; discovery will measure the configured seed terms.'
             : 'DOC 2.0 reachable. No seed terms configured, so discover() returns nothing — GDELT has no discovery endpoint and only answers supplied queries. measure() is unaffected.'
-          : `DOC 2.0 unreachable${lastError ? `: ${lastError}` : '.'} GDELT resets TLS connections under load and from some sandboxed networks; the platform runs without it.`,
+          : throttled
+            ? `DOC 2.0 is up but throttling us${lastError ? `: ${lastError}` : '.'} Requests are paused for ${Math.round(THROTTLE_COOLDOWN_MS / 1000)}s at a time until it clears.`
+            : `DOC 2.0 unreachable${lastError ? `: ${lastError}` : '.'} GDELT resets TLS connections under load and from some sandboxed networks; the platform runs without it.`,
         // GDELT DOC 2.0 is entirely anonymous. There is no key, no signup, and
         // therefore nothing an operator could configure to change this.
         requiresCredentials: false,

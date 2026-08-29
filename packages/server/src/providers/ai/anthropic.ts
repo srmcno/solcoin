@@ -75,9 +75,15 @@ export interface AnthropicModelSpec {
    */
   supportsTemperature: boolean;
   /**
-   * Models where thinking runs unless explicitly disabled. Forced `tool_choice`
-   * and extended thinking do not combine, and thinking tokens are billed as
-   * output — so structured calls to these models opt out explicitly.
+   * Models where thinking runs unless explicitly disabled.
+   *
+   * Thinking is NOT incompatible with a forced `tool_choice` on the first-party
+   * API — that restriction applies to Amazon Bedrock, which this adapter does
+   * not talk to. The reason structured calls opt out is narrower and purely
+   * economic: `max_tokens` is a hard ceiling on thinking *plus* the answer, and
+   * this platform's ceiling is small (4096 by default), so an unbounded think
+   * would truncate the tool input it is supposed to produce. Set
+   * `keepThinkingEnabled` to leave it on where the ceiling is generous.
    */
   thinkingOnByDefault: boolean;
 }
@@ -224,8 +230,11 @@ export interface AnthropicProviderDeps {
   extraModels?: Record<string, AnthropicModelSpec>;
   /**
    * Leave extended thinking enabled on models that default it on. Off by
-   * default: thinking tokens bill as output, and forced tool choice — which is
-   * how every schema-constrained call is made — does not combine with it.
+   * default only because thinking shares the `max_tokens` ceiling with the
+   * answer, and this platform's ceiling is small enough that a long think would
+   * truncate the structured result. Turn it on wherever the ceiling is raised —
+   * the vendor's own guidance is that thinking-on with a low effort beats
+   * thinking-off on the current models.
    */
   keepThinkingEnabled?: boolean;
   /** Injectable client, for tests. A correctly configured one is built if absent. */
@@ -320,9 +329,12 @@ export function createAnthropicProvider(deps: AnthropicProviderDeps): AnthropicA
       model,
       // Clamped: max_tokens is required and must be a positive integer.
       max_tokens: Math.max(1, Math.floor(request.maxOutputTokens)),
-      system: request.system,
       messages: request.messages.map((m) => ({ role: m.role, content: m.content })),
     };
+
+    // An empty `system` is rejected as an empty text block, so the field is
+    // omitted rather than sent blank.
+    if (request.system.trim()) body.system = request.system;
 
     // Sampling parameters are rejected outright by the current Opus/Sonnet
     // generation. Dropping a caller's temperature is a lossy but recoverable
@@ -338,17 +350,28 @@ export function createAnthropicProvider(deps: AnthropicProviderDeps): AnthropicA
           name: STRUCTURED_TOOL_NAME,
           description:
             'Emit the final result. Every field must satisfy the schema exactly. ' +
-            'Call this tool once and do not write any prose outside it.',
+            'Call this tool once and do not write any prose outside it. ' +
+            // Both sentences are the vendor's documented mitigation for running
+            // with thinking off: without the first, the model sometimes writes
+            // the call out as text instead of calling the tool; without the
+            // second, internal tags leak into the visible response.
+            'If nothing in the schema can express the answer, say so plainly instead of guessing. ' +
+            'Never include internal or system XML tags in your response.',
           input_schema: schema.schema,
         },
       ];
       body.tool_choice = { type: 'tool', name: STRUCTURED_TOOL_NAME };
 
-      // Thinking bills as output tokens and does not combine with a forced tool
-      // choice, so structured calls opt out on the models that enable it by
-      // default. The documented cost of doing so is that the model occasionally
-      // writes the call as visible text instead of a tool_use block — which is
-      // precisely the case the text fallback below exists to catch.
+      // Thinking shares the `max_tokens` ceiling with the answer, so it is
+      // turned off for structured calls on the models that default it on — a
+      // long think would otherwise truncate the tool input it exists to
+      // produce. This is permitted only at effort `high` or below, which is the
+      // default and is why no `output_config.effort` is sent; raising effort
+      // here without also re-enabling thinking would be rejected outright.
+      //
+      // The documented cost is that the model occasionally writes the call as
+      // visible text instead of a tool_use block. That is what the text
+      // fallback below exists to catch, and why it is counted.
       if (spec.thinkingOnByDefault && !deps.keepThinkingEnabled) {
         body.thinking = { type: 'disabled' };
       }
@@ -392,7 +415,7 @@ export function createAnthropicProvider(deps: AnthropicProviderDeps): AnthropicA
         // JSON object out of the text so a single bad turn does not lose the
         // whole call, and count it: this path is a degradation, not a design.
         stats.schemaFallbacks++;
-        const scraped = extractJsonObject(text);
+        const scraped = unwrapToolEnvelope(extractJsonObject(text));
         if (scraped !== null) parsed = schema.unwrap(scraped);
         log.warn(
           { model, purpose: request.purpose, recovered: scraped !== null, schemaFallbacks: stats.schemaFallbacks },
@@ -530,12 +553,27 @@ export function createAnthropicProvider(deps: AnthropicProviderDeps): AnthropicA
     healthCheck,
     complete,
     models() {
-      return Object.entries(catalogue).map(([id, spec]) => ({
+      const entry = (id: string, spec: AnthropicModelSpec) => ({
         id,
         inputCostPerMTok: spec.inputCostPerMTok,
         outputCostPerMTok: spec.outputCostPerMTok,
         tier: spec.tier,
-      }));
+      });
+
+      // Canonical ids first, so a tier lookup resolves to one of them.
+      const out = Object.entries(catalogue).map(([id, spec]) => entry(id, spec));
+
+      // Aliases are advertised too. The router matches an operator's configured
+      // model id against this list *exactly*; without the aliases a stored
+      // dated id (which is what this repo's own default triage setting still
+      // ships) misses, and the call is quietly re-routed as an "equivalent
+      // tier" substitute — which, with a second vendor configured, can mean a
+      // different vendor than the operator asked for.
+      for (const [alias, target] of Object.entries(ANTHROPIC_MODEL_ALIASES)) {
+        const spec = catalogue[target];
+        if (spec && !catalogue[alias]) out.push(entry(alias, spec));
+      }
+      return out;
     },
   };
 }
@@ -619,6 +657,33 @@ export function extractJsonObject(text: string): unknown | null {
     }
   }
   return null;
+}
+
+/**
+ * Unwrap a tool call the model wrote out as text instead of calling the tool.
+ *
+ * This is the exact shape the documented thinking-off failure mode produces:
+ * `{"type":"tool_use","name":"emit_result","input":{...}}` in a text block. The
+ * payload the caller asked for is the `input`, not the envelope around it, and
+ * handing back the envelope would fail schema validation for a response that
+ * actually contained the right answer. Anything that is not recognisably this
+ * platform's own envelope is passed through untouched — the model's own object
+ * is never second-guessed.
+ */
+function unwrapToolEnvelope(value: unknown): unknown | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) return value;
+  // Match on the envelope's shape rather than only on our own tool name: a
+  // model that writes the call out as text sometimes renames it, and
+  // `{type:'tool_use', name, input:{...}}` is unambiguous enough to unwrap
+  // safely. Anything that is not that exact shape is passed through untouched —
+  // the model's own object is never second-guessed.
+  const looksLikeEnvelope =
+    value.type === 'tool_use' && typeof value.name === 'string' && isRecord(value.input);
+  if (looksLikeEnvelope || value.name === STRUCTURED_TOOL_NAME) {
+    return isRecord(value.input) ? value.input : value;
+  }
+  return value;
 }
 
 /** Turn a transport failure into an error whose code reflects what happened. */

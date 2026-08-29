@@ -28,20 +28,29 @@ import { AUDIT_ACTIONS, type AuditLog } from '../security/audit.js';
  *
  * Three rules are enforced here rather than left to the caller:
  *
- *  1. **Assignment is deterministic in the subject id.** Re-running the
- *     pipeline over the same concept must land on the same arm. If a
- *     re-evaluation could reassign, the arm a concept ends up in would
- *     correlate with how many times it was re-evaluated — and re-evaluation is
- *     itself a function of how promising the concept looked. That is textbook
- *     selection bias and it would silently destroy the causal claim the
- *     experiment is supposed to support.
+ *  1. **A subject's arm never changes once assigned.** Re-running the pipeline
+ *     over the same concept lands on the same arm, because the recorded
+ *     assignment is returned unchanged. If a re-evaluation could reassign, the
+ *     arm a concept ends up in would correlate with how many times it was
+ *     re-evaluated — and re-evaluation is itself a function of how promising
+ *     the concept looked. That is textbook selection bias and it would silently
+ *     destroy the causal claim the experiment is supposed to support. A
+ *     first-time assignment is a hash of `experimentId:subjectId`, nudged
+ *     toward a starved arm only where the choice can be persisted; neither
+ *     input is anything the pipeline scored.
  *  2. **Every reported rate carries n and a credible interval.** A 2-of-3 arm
  *     reports a Beta posterior mean near 0.5 with a very wide interval, not
- *     "67%".
+ *     "67%". Every figure in the metric block carries its own `valueCount`,
+ *     which can be smaller than the arm's n.
  *  3. **`conclusive` is a high bar.** Every arm must reach its pre-registered
  *     minimum sample size *and* one arm must win the posterior comparison with
  *     probability above 0.9. Anything short of that is reported, in plain
  *     English, as "not yet distinguishable from chance".
+ *  4. **A missing number is null, never zero, and the limits travel with the
+ *     result.** An arm with no measured outcomes has no mean; every result
+ *     carries a `caveats` list naming what randomisation does and does not buy
+ *     here — in particular that outcomes exist only for concepts the pipeline
+ *     went on to launch, which is a decision made *after* assignment.
  */
 
 // ---------------------------------------------------------------------------

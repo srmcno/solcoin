@@ -426,7 +426,9 @@ export function createHackerNewsProvider(deps: HackerNewsProviderDeps = {}): Tre
         createdAtMs: story.createdAtSec * 1000,
         onFrontPage: extras.onFrontPage,
         transport: 'algolia',
-        author: story.author,
+        // A username is chosen by a stranger, so it is sanitised like any other
+        // external string even though HN's own charset is narrow.
+        author: story.author ? sanitiseExternalText(story.author, 60) : undefined,
         // The submitted link is kept for domain-level analysis but is never
         // used as the signal's own URL.
         submittedUrl: story.linkUrl,

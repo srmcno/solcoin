@@ -408,43 +408,67 @@ export class AccountingService {
     let costSol = 0;
     let revenueUsd = 0;
     let costUsd = 0;
+    let revenueEntryCount = 0;
+    let costEntryCount = 0;
+    let revenueEntriesMissingUsd = 0;
+    let costEntriesMissingUsd = 0;
     let entriesMissingUsd = 0;
     let entriesMissingSol = 0;
     let transferCount = 0;
-    let transferSol = 0;
+    let transferInSol = 0;
+    let transferOutSol = 0;
 
     for (const entry of entries) {
-      const bucket = byCategory.get(entry.category) ?? {
+      // Keyed on category *and* direction: wallet_transfer holds both an
+      // inbound and an outbound stream, and one bucket cannot honestly carry a
+      // single `type` or a single total for the two.
+      const bucketKey = `${entry.category}\u0000${entry.type}`;
+      const bucket = byCategory.get(bucketKey) ?? {
         category: entry.category,
         type: entry.type,
         entryCount: 0,
         amountSol: 0,
         amountUsd: 0,
         entriesMissingUsd: 0,
+        usdCoverage: null,
         countsTowardPnl: entry.countsTowardPnl,
       };
       bucket.entryCount += 1;
       bucket.amountSol += entry.amountSol;
       if (entry.amountUsd === null) bucket.entriesMissingUsd += 1;
       else bucket.amountUsd += entry.amountUsd;
-      byCategory.set(entry.category, bucket);
+      bucket.usdCoverage = bucket.entryCount > 0 ? 1 - bucket.entriesMissingUsd / bucket.entryCount : null;
+      byCategory.set(bucketKey, bucket);
 
       if (entry.amountUsd === null) entriesMissingUsd += 1;
       if (entry.amountSol === 0 && entry.amountUsd !== null && entry.amountUsd > 0) entriesMissingSol += 1;
 
       if (!entry.countsTowardPnl) {
         transferCount += 1;
-        transferSol += entry.amountSol;
+        if (entry.type === 'revenue') transferInSol += entry.amountSol;
+        else transferOutSol += entry.amountSol;
         continue;
       }
       if (entry.type === 'revenue') {
+        revenueEntryCount += 1;
         revenueSol += entry.amountSol;
         if (entry.amountUsd !== null) revenueUsd += entry.amountUsd;
+        else revenueEntriesMissingUsd += 1;
       } else {
+        costEntryCount += 1;
         costSol += entry.amountSol;
         if (entry.amountUsd !== null) costUsd += entry.amountUsd;
+        else costEntriesMissingUsd += 1;
       }
     }
+
+    // A side with no valued entry has no USD total. Reporting 0 there, and then
+    // netting it, is how an unpriced cost base turns into a headline profit.
+    const revenueValued = revenueEntryCount - revenueEntriesMissingUsd;
+    const costValued = costEntryCount - costEntriesMissingUsd;
+    const revenueUsdTotal = revenueValued > 0 ? revenueUsd : null;
+    const costUsdTotal = costValued > 0 ? costUsd : null;
+    const netUsdTotal = revenueUsdTotal !== null && costUsdTotal !== null ? revenueUsdTotal - costUsdTotal : null;
 
     const notes: string[] = [
       'Revenue is creator fees actually collected on-chain (cash basis). Fees accrued in a vault but not yet claimed are not revenue here.',
@@ -461,6 +485,29 @@ export class AccountingService {
         `${entriesMissingSol} entries were billed in USD with no SOL price recorded, so they contribute to the USD costs but not to the SOL costs. The SOL net is understated by that amount.`,
       );
     }
+    // The two sides of a net figure are priced by different mechanisms — fees
+    // carry a captured SOL price, launch spend carries none — so their coverage
+    // routinely differs, and a net computed across the gap is not a net.
+    if (revenueEntryCount > 0 && costEntryCount > 0) {
+      const revenueCoverage = 1 - revenueEntriesMissingUsd / revenueEntryCount;
+      const costCoverage = 1 - costEntriesMissingUsd / costEntryCount;
+      if (Math.abs(revenueCoverage - costCoverage) > 0.1) {
+        notes.push(
+          `USD coverage is uneven between the two sides: ${(revenueCoverage * 100).toFixed(0)}% of the ${revenueEntryCount} revenue entries carry a recorded price against ${(costCoverage * 100).toFixed(0)}% of the ${costEntryCount} cost entries. netUsd compares two differently complete totals and overstates whichever side is better covered; read the SOL net instead.`,
+        );
+      }
+    }
+    if (revenueUsdTotal === null && revenueEntryCount > 0) {
+      notes.push(`None of the ${revenueEntryCount} revenue entries carried a recorded SOL price, so revenueUsd is null rather than zero: the revenue is unvalued, not absent.`);
+    }
+    if (costUsdTotal === null && costEntryCount > 0) {
+      notes.push(`None of the ${costEntryCount} cost entries carried a recorded SOL price, so costUsd is null rather than zero: the costs are unvalued, not absent.`);
+    }
+    if (transferCount > 0) {
+      notes.push(
+        `${transferCount} internal transfer entries moved ${transferInSol.toFixed(6)} SOL in and ${transferOutSol.toFixed(6)} SOL out. transferSol is the gross movement of the two, not a balance, and none of it is revenue or cost.`,
+      );
+    }
     notes.push(
       'Creator fee collections are wallet-level on-chain events; the fee ledger does not carry a network, so those entries show a network only where the event is attributed to a token.',
     );
@@ -473,14 +520,20 @@ export class AccountingService {
       revenueSol,
       costSol,
       netSol: revenueSol - costSol,
-      revenueUsd,
-      costUsd,
-      netUsd: revenueUsd - costUsd,
+      revenueUsd: revenueUsdTotal,
+      costUsd: costUsdTotal,
+      netUsd: netUsdTotal,
       entriesMissingUsd,
       usdCoverage: entries.length > 0 ? 1 - entriesMissingUsd / entries.length : 0,
+      revenueEntryCount,
+      revenueEntriesMissingUsd,
+      costEntryCount,
+      costEntriesMissingUsd,
       entriesMissingSol,
       transferCount,
-      transferSol,
+      transferInSol,
+      transferOutSol,
+      transferSol: transferInSol + transferOutSol,
       notes,
       disclaimer: ACCOUNTING_DISCLAIMER,
     };
@@ -557,40 +610,76 @@ export class AccountingService {
    */
   async monthlyBreakdown(): Promise<MonthlyBreakdownRow[]> {
     const entries = this.collect({});
-    const months = new Map<
-      string,
-      { revenueSol: number; costSol: number; revenueUsd: number; costUsd: number; usdEntries: number; launches: number }
-    >();
+    interface MonthBucket {
+      revenueSol: number;
+      costSol: number;
+      revenueUsd: number;
+      costUsd: number;
+      /** Valued entries counted per side: the two are priced differently. */
+      revenueUsdEntries: number;
+      costUsdEntries: number;
+      entryCount: number;
+      entriesMissingUsd: number;
+      launches: number;
+    }
+    const months = new Map<string, MonthBucket>();
 
     for (const entry of entries) {
       const month = new Date(entry.occurredAtMs).toISOString().slice(0, 7);
-      const bucket = months.get(month) ?? { revenueSol: 0, costSol: 0, revenueUsd: 0, costUsd: 0, usdEntries: 0, launches: 0 };
+      const bucket: MonthBucket = months.get(month) ?? {
+        revenueSol: 0,
+        costSol: 0,
+        revenueUsd: 0,
+        costUsd: 0,
+        revenueUsdEntries: 0,
+        costUsdEntries: 0,
+        entryCount: 0,
+        entriesMissingUsd: 0,
+        launches: 0,
+      };
       if (entry.source === 'launches') bucket.launches += 1;
       if (entry.countsTowardPnl) {
+        bucket.entryCount += 1;
+        if (entry.amountUsd === null) bucket.entriesMissingUsd += 1;
         if (entry.type === 'revenue') {
           bucket.revenueSol += entry.amountSol;
-          if (entry.amountUsd !== null) bucket.revenueUsd += entry.amountUsd;
+          if (entry.amountUsd !== null) {
+            bucket.revenueUsd += entry.amountUsd;
+            bucket.revenueUsdEntries += 1;
+          }
         } else {
           bucket.costSol += entry.amountSol;
-          if (entry.amountUsd !== null) bucket.costUsd += entry.amountUsd;
+          if (entry.amountUsd !== null) {
+            bucket.costUsd += entry.amountUsd;
+            bucket.costUsdEntries += 1;
+          }
         }
-        if (entry.amountUsd !== null) bucket.usdEntries += 1;
       }
       months.set(month, bucket);
     }
 
+    // Each side is gated on its own valuation coverage. Gating both on a single
+    // counter reported 0 for an entirely unpriced side whenever the *other*
+    // side happened to be priced — a zero that reads as "no revenue this month"
+    // when the truth is "no price was ever recorded for it".
     return [...months.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([month, b]) => ({
-        month,
-        revenueSol: b.revenueSol,
-        costSol: b.costSol,
-        netSol: b.revenueSol - b.costSol,
-        revenueUsd: b.usdEntries > 0 ? b.revenueUsd : null,
-        costUsd: b.usdEntries > 0 ? b.costUsd : null,
-        netUsd: b.usdEntries > 0 ? b.revenueUsd - b.costUsd : null,
-        launches: b.launches,
-      }));
+      .map(([month, b]) => {
+        const revenueUsd = b.revenueUsdEntries > 0 ? b.revenueUsd : null;
+        const costUsd = b.costUsdEntries > 0 ? b.costUsd : null;
+        return {
+          month,
+          revenueSol: b.revenueSol,
+          costSol: b.costSol,
+          netSol: b.revenueSol - b.costSol,
+          revenueUsd,
+          costUsd,
+          netUsd: revenueUsd !== null && costUsd !== null ? revenueUsd - costUsd : null,
+          entryCount: b.entryCount,
+          entriesMissingUsd: b.entriesMissingUsd,
+          launches: b.launches,
+        };
+      });
   }
 
   // -------------------------------------------------------------------------

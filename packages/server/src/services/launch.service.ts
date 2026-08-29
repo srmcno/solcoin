@@ -181,12 +181,31 @@ export class LaunchService {
           this.now(),
         );
     } catch (e) {
+      // A unique-constraint violation here means a concurrent attempt claimed
+      // the key first. For correctness that is a success — exactly one launch
+      // exists — so it is reported as a blocked outcome rather than thrown.
       const conflicting = this.findByIdempotencyKey(idempotencyKey);
       if (conflicting) {
         const reconciled = await this.reconcile(conflicting, options.signal);
         if (reconciled) return reconciled;
+        return {
+          launchId: String(conflicting.id),
+          status: 'blocked',
+          network,
+          error: 'Another launch attempt for this concept is already in progress on this network.',
+          errorCode: 'conflict',
+          simulated: network === 'simulation',
+        };
       }
-      throw new AppError('conflict', 'A launch for this concept is already in progress on this network.', { cause: e });
+      this.log.error({ conceptId: input.conceptId, err: safeErrorText(e, 200) }, 'could not claim the launch idempotency key');
+      return {
+        launchId: '',
+        status: 'blocked',
+        network,
+        error: 'Could not claim the launch idempotency key.',
+        errorCode: 'conflict',
+        simulated: network === 'simulation',
+      };
     }
 
     this.audit.record({
@@ -353,10 +372,26 @@ export class LaunchService {
       };
     }
 
+    if (status === 'preparing') {
+      // Another attempt holds the key and has not broadcast yet. Waiting is
+      // correct; starting a second attempt is exactly the duplicate this
+      // machinery exists to prevent.
+      const ageMs = this.now() - Number(row.created_at ?? 0);
+      return {
+        launchId,
+        status: 'blocked',
+        network,
+        error: `A launch attempt for this concept started ${Math.round(ageMs / 1000)}s ago and has not finished. It will be resolved by the recovery job.`,
+        errorCode: 'conflict',
+        simulated: network === 'simulation',
+      };
+    }
+
     if (status === 'submitted' && row.transaction_signature) {
-      // A previous process broadcast this and then stopped. Confirm the
-      // existing signature rather than sending anything new.
-      const adapter = this.adapterFor(network);
+      // A previous process broadcast this and then stopped. Deliberately no
+      // adapter is required here: resolving the outcome is the recovery job's
+      // responsibility, and this path must work even when the adapter that
+      // produced the transaction is no longer available.
       const signature = String(row.transaction_signature);
       this.log.warn({ launchId, signature }, 'found a submitted launch with no confirmation; reconciling on chain');
 
@@ -372,24 +407,16 @@ export class LaunchService {
         };
       }
 
-      const mint = row.mint_address as string | null;
-      if (mint) {
-        try {
-          const accrued = await adapter.getAccruedFees(mint).catch(() => null);
-          void accrued;
-        } catch {
-          // Not fatal; the mint-existence check below is the real signal.
-        }
-      }
-      // Leave the row as `submitted`. The monitoring job resolves it once the
+      // Leave the row as `submitted`. The recovery job resolves it once the
       // mint appears on chain; guessing here risks marking a live token failed.
       return {
         launchId,
-        status: 'failed',
+        status: 'blocked',
         network,
         error:
-          'A previous attempt broadcast a transaction whose outcome is still unknown. The launch is being reconciled on chain; it will not be retried until that resolves.',
+          'A previous attempt broadcast a transaction whose outcome is still unknown. It is being reconciled on chain and will not be retried until that resolves.',
         errorCode: 'conflict',
+        // The simulation case returned above, so reaching here means a real network.
         simulated: false,
       };
     }

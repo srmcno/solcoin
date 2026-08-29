@@ -20,9 +20,16 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; weight: number; label: string
   { pattern: /forget\s+(everything|all|your)\s+(you|instructions|rules|prompt)/i, weight: 0.9, label: 'forget-instructions' },
   { pattern: /\byou\s+are\s+now\s+(a|an|the)\b/i, weight: 0.7, label: 'role-reassignment' },
   { pattern: /\bnew\s+(instructions?|system\s+prompt|directive)\b/i, weight: 0.9, label: 'new-instructions' },
-  { pattern: /\bsystem\s*[:>]\s*/i, weight: 0.6, label: 'fake-system-turn' },
-  { pattern: /<\/?(system|assistant|user|instructions?|prompt)\b[^>]*>/i, weight: 0.8, label: 'fake-role-tag' },
-  { pattern: /\[\s*(system|assistant|inst|\/inst)\s*\]/i, weight: 0.8, label: 'fake-bracket-role' },
+  // The next three are structural rather than semantic, and `sanitiseExternalText`
+  // already neutralises them before any model sees the content. They are
+  // therefore weighted below the quarantine threshold on their own: a post that
+  // merely *mentions* an HTML-ish tag or a system prompt is ordinary internet
+  // content, and dropping it would lose real signal for no security gain. They
+  // still contribute to the saturating sum, so a message combining several of
+  // them with anything semantic is quarantined.
+  { pattern: /\bsystem\s*[:>]\s*/i, weight: 0.3, label: 'fake-system-turn' },
+  { pattern: /<\/?(system|assistant|user|instructions?|prompt)\b[^>]*>/i, weight: 0.4, label: 'fake-role-tag' },
+  { pattern: /\[\s*(system|assistant|inst|\/inst)\s*\]/i, weight: 0.4, label: 'fake-bracket-role' },
   { pattern: /\bdeveloper\s+mode\b/i, weight: 0.7, label: 'developer-mode' },
   { pattern: /\bjailbreak\b/i, weight: 0.7, label: 'jailbreak' },
   { pattern: /\bDAN\b\s+mode/i, weight: 0.7, label: 'dan-mode' },

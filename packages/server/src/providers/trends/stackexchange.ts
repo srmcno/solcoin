@@ -179,7 +179,12 @@ function parseQuestion(raw: unknown): SeQuestion | null {
   const rawTags = raw['tags'];
   if (Array.isArray(rawTags)) {
     for (const tag of rawTags) {
-      if (typeof tag === 'string' && tag.length > 0) tags.push(tag.toLowerCase());
+      if (typeof tag !== 'string' || tag.length === 0) continue;
+      // Tags come from a user-created vocabulary, and they are carried into
+      // `keywords` without passing through `contentTokens`, so they are
+      // sanitised and length-bounded here rather than trusted as-is.
+      const clean = sanitiseExternalText(tag.toLowerCase(), 60);
+      if (clean.length > 0) tags.push(clean);
     }
   }
 
