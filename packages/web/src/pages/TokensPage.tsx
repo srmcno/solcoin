@@ -179,8 +179,10 @@ export function TokensPage() {
   });
 
   const tokens = useMemo(() => query.data?.tokens ?? [], [query.data]);
-  const lifecycleCounts = query.data?.lifecycleCounts ?? {};
-  const monitoringTiers = query.data?.monitoringTiers ?? [];
+  // A fresh `{}` on every render would make both memos below recompute every
+  // render, which is the opposite of what they are there for.
+  const lifecycleCounts = useMemo(() => query.data?.lifecycleCounts ?? {}, [query.data]);
+  const monitoringTiers = useMemo(() => query.data?.monitoringTiers ?? [], [query.data]);
 
   const totalTracked = useMemo(
     () => Object.values(lifecycleCounts).reduce((sum, n) => sum + num(n), 0),

@@ -560,11 +560,15 @@ function CalibrationSection({
               </tr>
             </thead>
             <tbody>
-              {heads.map((h) => {
+              {heads.map((h, headIndex) => {
                 const n = h.n ?? 0;
                 const verdict = h.verdict ?? 'insufficient data';
+                // The service sets `reliable: false` below its verdict threshold:
+                // the numbers on the row are printable, not evidence. Saying so
+                // on the row matters more than the row itself.
+                const unreliable = h.reliable === false;
                 return (
-                  <tr key={h.head ?? Math.random()}>
+                  <tr key={h.head ?? `head-${headIndex}`}>
                     <Td className="text-ink">
                       <div className="font-medium">{headLabel(h.head)}</div>
                       <div className="text-xs text-ink-subtle">{HEAD_MEANING[h.head ?? ''] ?? ''}</div>
@@ -605,7 +609,12 @@ function CalibrationSection({
                       )}
                     </Td>
                     <Td>
-                      <Badge tone={VERDICT_TONE[verdict] ?? 'neutral'}>{verdict}</Badge>
+                      <Badge tone={unreliable ? 'warning' : (VERDICT_TONE[verdict] ?? 'neutral')}>{verdict}</Badge>
+                      {unreliable && (
+                        <div className="mt-1 max-w-[16rem] whitespace-normal text-xs leading-relaxed text-warning">
+                          ⚠ Marked unreliable by the service — the metrics on this row are printed, not established.
+                        </div>
+                      )}
                     </Td>
                   </tr>
                 );
@@ -629,11 +638,11 @@ function CalibrationSection({
                     {selected?.explanation ?? 'This head has not been scored.'}
                   </p>
                 </div>
-                {(selected?.n ?? 0) < MIN_VERDICT_SAMPLES && (
+                {(selected?.reliable === false || (selected?.n ?? 0) < MIN_VERDICT_SAMPLES) && (
                   <Note tone="warning">
-                    Only {formatNumber(selected?.n ?? 0)} labelled launch(es) for this head. The points below are drawn because
-                    they exist, not because they are evidence — at least {MIN_VERDICT_SAMPLES} are needed before the gap between
-                    forecast and reality means anything.
+                    The service marks this head unreliable: {formatNumber(selected?.n ?? 0)} labelled launch(es). The points
+                    beside this are drawn because they exist, not because they are evidence — at least {MIN_VERDICT_SAMPLES} are
+                    needed before the gap between forecast and reality means anything.
                   </Note>
                 )}
               </div>
@@ -810,7 +819,9 @@ function BaseRatesSection({ rates }: { rates?: ObservedBaseRates }) {
   }
 
   const rows = HEADS.map((head) => ({ head, rate: rates[head] }));
-  const anyObserved = rows.some((r) => (r.rate?.source ?? 'prior') === 'observed');
+  // `sufficient` is the service's own judgement; `source` is how it acted on it.
+  // They agree, and the flag is what is reported rather than being re-derived.
+  const anyObserved = rates.sufficient === true || rows.some((r) => r.rate?.sufficient === true);
 
   return (
     <Card>
@@ -820,14 +831,17 @@ function BaseRatesSection({ rates }: { rates?: ObservedBaseRates }) {
         action={<SampleSize n={rates.n ?? 0} minimum={30} />}
       />
 
-      {!anyObserved && (
-        <div className="mt-3">
-          <Note tone="warning">
-            Every rate below is still the hand-set prior, not a measurement.{' '}
-            {rates.reason ?? 'Not enough labelled launches to replace any prior yet.'}
-          </Note>
-        </div>
-      )}
+      {/* The service's `reason` explains the state either way, so it is shown
+          either way — a reader who sees measured rates still needs to know how
+          they were arrived at. */}
+      <div className="mt-3">
+        <Note tone={anyObserved ? 'info' : 'warning'}>
+          <strong className="font-semibold">
+            {anyObserved ? 'Some rates are measured. ' : 'Every rate below is the hand-set prior, not a measurement. '}
+          </strong>
+          {rates.reason ?? 'The service did not explain how these rates were arrived at.'}
+        </Note>
+      </div>
 
       <DataTable className="mt-4">
         <thead>
@@ -845,7 +859,7 @@ function BaseRatesSection({ rates }: { rates?: ObservedBaseRates }) {
             const observedN = rate?.observedN ?? 0;
             const successes = rate?.successes ?? 0;
             const raw = observedN > 0 ? successes / observedN : null;
-            const isPrior = (rate?.source ?? 'prior') !== 'observed';
+            const isPrior = rate?.sufficient !== true;
             return (
               <tr key={head}>
                 <Td className="text-ink">
@@ -856,9 +870,16 @@ function BaseRatesSection({ rates }: { rates?: ObservedBaseRates }) {
                   {rate?.rate === undefined ? '—' : formatPercent(rate.rate, 1)}
                 </Td>
                 <Td align="right" className="tnum">
-                  {rate?.lower === undefined || rate.upper === undefined
-                    ? '—'
-                    : `${formatPercent(rate.lower, 1)}–${formatPercent(rate.upper, 1)}`}
+                  {/* A prior carries lower=0, upper=1. Printing "0%–100%" under a
+                      column headed "95% interval" dresses a hand-set constant up
+                      as a computed one, so a prior says it has no interval. */}
+                  {isPrior ? (
+                    <span className="text-xs italic text-ink-subtle">no interval — assumed</span>
+                  ) : rate?.lower === undefined || rate.upper === undefined ? (
+                    '—'
+                  ) : (
+                    `${formatPercent(rate.lower, 1)}–${formatPercent(rate.upper, 1)}`
+                  )}
                 </Td>
                 <Td align="right" className="tnum">
                   {raw === null ? (
@@ -977,7 +998,17 @@ function WeightsSection({ shifts, trainedOn }: { shifts: WeightShift[]; trainedO
 // --- 5. Revenue accuracy ---------------------------------------------------
 
 function RevenueSection({ revenue }: { revenue?: RevenueAccuracy }) {
-  if (!revenue) return null;
+  if (!revenue) {
+    return (
+      <Card>
+        <SectionHeader title="Revenue forecast accuracy" />
+        <EmptyState
+          title="No revenue accuracy block returned"
+          description="The learning service did not report fee-forecast accuracy. It appears once at least one launch has both a stored fee forecast and a measured fee total."
+        />
+      </Card>
+    );
+  }
   const n = revenue.n ?? 0;
   const actual = revenue.actualFeesSol;
   const predicted = revenue.predictedFeesSol;
@@ -997,10 +1028,16 @@ function RevenueSection({ revenue }: { revenue?: RevenueAccuracy }) {
         />
       ) : (
         <>
-          {revenue.reliable === false && (
+          {/* `note` is the service's own qualification of these figures and is
+              shown whether or not it also set `reliable: false`. */}
+          {(revenue.reliable === false || revenue.note) && (
             <div className="mt-3">
-              <Note tone="warning">
-                {revenue.note ?? `Only ${formatNumber(n)} measured launch(es) — the shape of this distribution is not yet estimated.`}
+              <Note tone={revenue.reliable === false ? 'warning' : 'info'}>
+                {revenue.reliable === false && (
+                  <strong className="font-semibold">Not reliable at this sample size. </strong>
+                )}
+                {revenue.note ??
+                  `Only ${formatNumber(n)} measured launch(es) — the shape of this distribution is not yet estimated.`}
               </Note>
             </div>
           )}
@@ -1051,6 +1088,13 @@ function SkewRow({ label, tone, summary }: { label: string; tone: string; summar
       <Td className={'font-medium ' + tone}>
         {label}
         <div className="text-xs font-normal text-ink-subtle">n={formatNumber(summary.n ?? 0)}</div>
+        {/* `reliable: false` means the shape — p10, p90, top-decile share — is
+            not estimated. The cells still print, so the row has to say so. */}
+        {summary.reliable === false && (
+          <div className="whitespace-normal text-xs font-normal leading-relaxed text-warning">
+            ⚠ shape not estimated at this n
+          </div>
+        )}
       </Td>
       <Td align="right" className="tnum text-ink">
         {formatSol(summary.median)}
@@ -1092,7 +1136,8 @@ function ErrorsSection({ query }: { query: ErrorsQueryLike }) {
     <Card>
       <SectionHeader
         title="Prediction versus reality"
-        description="Every launch the model published a forecast for, newest first, with what actually happened and why the model thought what it did."
+        description="The 50 most recent launches the model published a forecast for, with what actually happened and why the model thought what it did. This is a window on the history, not the whole of it — the calibration figures above are computed over every scored launch, not just these rows."
+        action={rows.length > 0 ? <SampleSize n={rows.length} minimum={MIN_VERDICT_SAMPLES} /> : undefined}
       />
 
       {query.isLoading ? (
@@ -1244,7 +1289,17 @@ function HeadOutcome({
 // --- 7. Model versions -----------------------------------------------------
 
 function ModelVersionsSection({ models }: { models: ModelVersionRow[] }) {
-  if (models.length === 0) return null;
+  if (models.length === 0) {
+    return (
+      <Card>
+        <SectionHeader title="Model versions" />
+        <EmptyState
+          title="No trained bundle has been stored"
+          description="The platform is running on its starting priors, which are code, not a stored model. A row appears here the first time a training run produces a bundle — whether or not that bundle passes the calibration check and becomes active."
+        />
+      </Card>
+    );
+  }
   const shown = models.slice(0, 8);
 
   return (
@@ -1252,6 +1307,13 @@ function ModelVersionsSection({ models }: { models: ModelVersionRow[] }) {
       <SectionHeader
         title="Model versions"
         description="Every bundle the trainer has produced. Only one is active at a time; a version that was built but never activated failed the calibration check."
+        action={
+          models.length > shown.length ? (
+            <span className="tnum text-xs text-ink-subtle">
+              newest {formatNumber(shown.length)} of {formatNumber(models.length)}
+            </span>
+          ) : undefined
+        }
       />
       <DataTable className="mt-4">
         <thead>

@@ -168,16 +168,23 @@ function expiry(expiresAt: number | null, now: number): { text: string; tone: To
   return { text: `Expires in ${formatDuration(hours)}`, tone: hours < 6 ? 'warning' : 'neutral' };
 }
 
+/** What launching on this network actually costs, stated without euphemism. */
+function networkStakes(network: string | undefined): string {
+  if (network === 'mainnet') return ' — launches spend real funds and cannot be reversed.';
+  if (network === 'devnet') return ' — a real transaction on a test chain, paid for with test SOL.';
+  if (network === 'simulation') return ' — nothing is broadcast and no token is created anywhere.';
+  return ', which this page could not read, so it cannot tell you whether launches spend real funds.';
+}
+
 function AutonomyBanner({ autonomy, network }: { autonomy: string | undefined; network: string | undefined }) {
-  const net = network ? humanise(network) : 'unknown network';
+  const net = network ? humanise(network) : 'not reported';
   if (autonomy === 'auto') {
     return (
-      <Note tone="warning">
+      <Note tone={network === 'mainnet' || !network ? 'negative' : 'warning'}>
         <span aria-hidden="true">⚠</span> <strong>Launch autonomy: automatic.</strong> Approved candidates are launched
         by the platform without a further prompt, subject to the spend and rate limits in Settings. Network is{' '}
         <strong>{net}</strong>
-        {network === 'mainnet' ? ' — launches spend real funds.' : '.'} Rejecting a candidate is the only way to stop
-        it.
+        {networkStakes(network)} Rejecting a candidate is the only way to stop it.
       </Note>
     );
   }
@@ -185,7 +192,8 @@ function AutonomyBanner({ autonomy, network }: { autonomy: string | undefined; n
     return (
       <Note tone="info">
         <strong>Launch autonomy: approval required.</strong> Nothing launches without a human. A candidate stays here
-        until someone approves it, and only then can it be launched. Network is <strong>{net}</strong>.
+        until someone approves it, and only then can it be launched. Network is <strong>{net}</strong>
+        {networkStakes(network)}
       </Note>
     );
   }
@@ -302,6 +310,10 @@ export function CandidatesPage() {
   const lowConfidenceCount = candidates.filter(
     (c) => c.confidence !== null && c.confidence < LOW_CONFIDENCE,
   ).length;
+  // A candidate with no stored prediction has no expected value at all; its
+  // metrics read "—" rather than zero, and the count is stated so an operator
+  // is not left wondering whether the dashes mean nothing was earned.
+  const unpredictedCount = candidates.filter((c) => c.expectedValueSol === null).length;
 
   const tabs = STATUS_TABS.map((tab) => ({ id: tab.id, label: tab.label, count: counts[tab.id] ?? 0 }));
   const empty = EMPTY_COPY[status];
@@ -388,6 +400,16 @@ export function CandidatesPage() {
                 </Note>
               )}
 
+              {unpredictedCount > 0 && (
+                <Note>
+                  {unpredictedCount === candidates.length
+                    ? 'None of the candidates below have'
+                    : `${formatNumber(unpredictedCount)} of ${formatNumber(candidates.length)} candidates below have`}{' '}
+                  a stored prediction yet, so their expected value and probability read &quot;—&quot;. That is a
+                  missing number, not a zero: the model has not run for them.
+                </Note>
+              )}
+
               <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {candidates.map((candidate) => {
                   const flags = parseRiskFlags(candidate.riskFlags);
@@ -395,6 +417,10 @@ export function CandidatesPage() {
                   const countdown = expiry(candidate.expiresAt, now);
                   const disagreed = candidate.aiPanelDisagreement > DISAGREEMENT_THRESHOLD;
                   const approvePending = approve.isPending && approve.variables?.id === candidate.id;
+                  // The API zero-fills the panel score, so 0 means "the panel
+                  // has not run" as often as it means "the panel scored zero".
+                  // Showing 0% would present an absent review as a bad one.
+                  const panelScored = candidate.aiPanelScore > 0;
 
                   return (
                     <div
@@ -483,24 +509,44 @@ export function CandidatesPage() {
                         <Metric
                           label="Expected value"
                           value={formatSol(candidate.expectedValueSol, { sign: true })}
-                          hint="Modelled net SOL after launch and operating costs."
+                          hint={
+                            candidate.expectedValueSol === null
+                              ? 'No prediction is stored for this candidate, so there is no expected value to show.'
+                              : 'Modelled net SOL after launch and operating costs.'
+                          }
                         />
                         <Metric
                           label="P(10 holders)"
                           value={formatPercent(candidate.probabilityTenHolders, 0)}
-                          hint="Modelled probability of reaching ten distinct holders."
+                          hint={
+                            candidate.probabilityTenHolders === null
+                              ? 'No prediction is stored for this candidate.'
+                              : 'Modelled probability of reaching ten distinct holders.'
+                          }
                         />
                         <Metric
                           label="Panel score"
-                          value={formatPercent(candidate.aiPanelScore, 0)}
-                          hint="Weighted mean across reviewer roles."
+                          value={panelScored ? formatPercent(candidate.aiPanelScore, 0) : '—'}
+                          hint={
+                            panelScored
+                              ? 'Weighted mean across reviewer roles.'
+                              : 'The review panel has not scored this candidate yet — this is blank, not zero.'
+                          }
                         />
                       </div>
 
-                      <ScoreBar
-                        value={candidate.aiPanelScore}
-                        tone={candidate.aiPanelScore > 0.7 ? 'positive' : candidate.aiPanelScore > 0.5 ? 'accent' : 'warning'}
-                      />
+                      {panelScored && (
+                        <ScoreBar
+                          value={candidate.aiPanelScore}
+                          tone={
+                            candidate.aiPanelScore > 0.7
+                              ? 'positive'
+                              : candidate.aiPanelScore > 0.5
+                                ? 'accent'
+                                : 'warning'
+                          }
+                        />
+                      )}
 
                       <div className="text-xs leading-relaxed text-ink-subtle">
                         {candidate.confidence === null ? (

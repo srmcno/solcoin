@@ -66,14 +66,20 @@ interface ArmRate {
 }
 
 interface ArmMetric {
-  meanValue?: number;
-  shrunkMeanValue?: number;
-  medianValue?: number;
-  p25?: number;
-  p75?: number;
-  p90?: number;
-  maxValue?: number;
-  topTenPercentShare?: number;
+  /**
+   * Outcomes that carried a numeric value. This — not the arm's `n` — is the
+   * sample behind every figure in the metric block, and it is routinely
+   * smaller: an outcome can be a recorded success with a null value.
+   */
+  valueCount?: number;
+  meanValue?: number | null;
+  shrunkMeanValue?: number | null;
+  medianValue?: number | null;
+  p25?: number | null;
+  p75?: number | null;
+  p90?: number | null;
+  maxValue?: number | null;
+  topTenPercentShare?: number | null;
   meanToMedianRatio?: number | null;
   tailStatisticsMeaningful?: boolean;
 }
@@ -85,6 +91,8 @@ interface ArmResult {
   config?: Record<string, unknown>;
   assigned?: number;
   n?: number;
+  /** Share of assignments that reached an outcome; null when none were assigned. */
+  outcomeCoverage?: number | null;
   successRate?: ArmRate;
   metric?: ArmMetric;
   probabilityBest?: number;
@@ -101,10 +109,16 @@ interface ExperimentResults {
   minSamplesPerArm?: number;
   totalAssigned?: number;
   totalOutcomes?: number;
+  /** Outcomes carrying a numeric value; the n behind `pooledMeanValue`. */
+  totalMetricValues?: number;
+  /** The target every arm's shrunk mean is pulled toward. Null when unmeasured. */
+  pooledMeanValue?: number | null;
   arms?: ArmResult[];
   leader?: { key?: string; probabilityBest?: number } | null;
   conclusive?: boolean;
   interpretation?: string;
+  /** What this comparison does and does not establish, in the service's words. */
+  caveats?: string[];
   monteCarloDraws?: number;
 }
 
@@ -382,6 +396,15 @@ function ResultsPanel({
   const smallestArm = arms.reduce<number | null>((min, a) => (min === null ? (a.n ?? 0) : Math.min(min, a.n ?? 0)), null);
   const conclusive = results?.conclusive === true;
 
+  // Differential attrition: randomisation balances arms at assignment, not at
+  // measurement. Coverage that differs between arms means the compared arms are
+  // no longer the randomised ones, so the spread is called out rather than
+  // being left for the reader to compute from the per-arm cards.
+  const coverages = arms
+    .map((a) => a.outcomeCoverage)
+    .filter((c): c is number => typeof c === 'number' && Number.isFinite(c));
+  const attritionSpread = coverages.length > 1 ? Math.max(...coverages) - Math.min(...coverages) : null;
+
   return (
     <div className="space-y-4">
       <Card>
@@ -436,6 +459,27 @@ function ResultsPanel({
             {experiment.conclusion}
           </p>
         )}
+
+        {/* The service writes out what randomisation here does and does not buy.
+            Dropping it would leave the table inviting a causal reading it has
+            not earned, which is the whole reason the service returns it. */}
+        {results?.caveats && results.caveats.length > 0 && (
+          <div className="mt-4 border-t border-border pt-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-subtle">
+              What this comparison does not establish
+            </h3>
+            <ul className="mt-2 space-y-2">
+              {results.caveats.map((caveat, i) => (
+                <li key={i} className="flex gap-2 text-xs leading-relaxed text-ink-muted">
+                  <span aria-hidden="true" className="text-warning">
+                    ▸
+                  </span>
+                  <span>{caveat}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -455,6 +499,17 @@ function ResultsPanel({
           />
         ) : (
           <>
+            {attritionSpread !== null && attritionSpread > 0.2 && (
+              <div className="mt-3">
+                <Note tone="warning">
+                  <strong className="font-semibold">Uneven outcome coverage. </strong>
+                  The share of assignments that reached a recorded outcome differs by{' '}
+                  {formatPercent(attritionSpread, 0)} between arms. Randomisation only balances the arms at assignment; if
+                  outcomes go missing at different rates afterwards, the arms being compared are no longer the arms that were
+                  randomised.
+                </Note>
+              </div>
+            )}
             <div className="mt-4 space-y-3">
               {arms.map((arm, i) => (
                 <ArmCard
@@ -464,6 +519,8 @@ function ResultsPanel({
                   metric={results?.metric ?? experiment.metric}
                   isLeader={Boolean(results?.leader?.key && results.leader.key === arm.key)}
                   conclusive={conclusive}
+                  pooledMeanValue={results?.pooledMeanValue ?? null}
+                  totalMetricValues={results?.totalMetricValues}
                 />
               ))}
             </div>
@@ -526,19 +583,26 @@ function ArmCard({
   metric,
   isLeader,
   conclusive,
+  pooledMeanValue,
+  totalMetricValues,
 }: {
   arm: ArmResult;
   minSamples: number;
   metric: string;
   isLeader: boolean;
   conclusive: boolean;
+  pooledMeanValue: number | null;
+  totalMetricValues?: number;
 }) {
   const n = arm.n ?? 0;
   const rate = arm.successRate;
-  const probabilityBest = arm.probabilityBest ?? 0;
+  const probabilityBest = arm.probabilityBest;
   const progress = minSamples > 0 ? Math.min(1, n / minSamples) : 0;
   const reached = arm.reachedMinSamples === true;
   const armMetric = arm.metric;
+  // The metric block has its own n: an outcome can be recorded without a value.
+  const valueCount = armMetric?.valueCount ?? 0;
+  const coverage = arm.outcomeCoverage;
 
   return (
     <div className="rounded-xl border border-border bg-surface-raised p-4">
@@ -556,21 +620,36 @@ function ArmCard({
           <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-ink-subtle">
             <span className="tnum">{formatNumber(arm.assigned ?? 0)} assigned</span>
             <span className="tnum">{formatNumber(n)} with outcome</span>
+            <span className={'tnum ' + (coverage !== null && coverage !== undefined && coverage < 0.8 ? 'text-warning' : '')}>
+              {coverage === null || coverage === undefined
+                ? 'coverage n/a'
+                : `${formatPercent(coverage, 0)} coverage`}
+            </span>
             <SampleSize n={n} minimum={Math.max(2, minSamples)} />
           </div>
         </div>
         <div className="text-right">
           <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">P(best)</div>
-          <div className="tnum text-xl font-semibold text-accent-soft">{formatPercent(probabilityBest, 0)}</div>
+          <div className="tnum text-xl font-semibold text-accent-soft">
+            {probabilityBest === undefined ? '—' : formatPercent(probabilityBest, 0)}
+          </div>
         </div>
       </div>
 
       <div className="mt-3">
         <div className="flex items-center justify-between text-xs text-ink-subtle">
           <span>Posterior probability this arm is best</span>
-          <span className="tnum">{formatPercent(probabilityBest, 1)}</span>
+          <span className="tnum">{probabilityBest === undefined ? '—' : formatPercent(probabilityBest, 1)}</span>
         </div>
-        <ScoreBar value={probabilityBest} tone={conclusive && isLeader ? 'positive' : 'accent'} className="mt-1 h-2" />
+        {probabilityBest !== undefined && (
+          <ScoreBar value={probabilityBest} tone={conclusive && isLeader ? 'positive' : 'accent'} className="mt-1 h-2" />
+        )}
+        {n === 0 && (
+          <p className="mt-1 text-xs leading-relaxed text-ink-subtle">
+            This arm has no outcomes, so it keeps its wide prior — the share above is what an untested arm is entitled to, not
+            something it has shown.
+          </p>
+        )}
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -602,16 +681,45 @@ function ArmCard({
         </div>
       </div>
 
-      {armMetric && n > 0 && (
+      {armMetric && (
         <div className="mt-3 border-t border-border pt-3">
-          <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">{humanise(metric)}</div>
-          <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
-            <MetricCell label="Median" value={formatScore(armMetric.medianValue, 4)} emphasis />
-            <MetricCell label="Mean" value={formatScore(armMetric.meanValue, 4)} />
-            <MetricCell label="Shrunk mean" value={formatScore(armMetric.shrunkMeanValue, 4)} />
-            <MetricCell label="p75 / p90" value={`${formatScore(armMetric.p75, 3)} / ${formatScore(armMetric.p90, 3)}`} />
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">{humanise(metric)}</div>
+            {/* The metric figures are conditional on `valueCount`, not on the
+                arm's outcome count, and the two differ whenever an outcome was
+                recorded without a value. The smaller number is the honest one. */}
+            <div className="flex items-center gap-2 text-xs text-ink-subtle">
+              <SampleSize n={valueCount} minimum={Math.max(2, minSamples)} />
+              {valueCount < n && (
+                <span className="text-warning">
+                  ⚠ {formatNumber(n - valueCount)} of {formatNumber(n)} outcome(s) carried no value
+                </span>
+              )}
+            </div>
           </div>
-          {armMetric.tailStatisticsMeaningful === false ? (
+          {valueCount === 0 ? (
+            <p className="mt-1 text-xs leading-relaxed text-ink-subtle">
+              No outcome in this arm carried a numeric {humanise(metric).toLowerCase()} value, so this arm has no median, no
+              mean and no percentiles. Nothing is shown rather than zeros, which would sit in the same column as measured
+              figures.
+            </p>
+          ) : (
+            <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
+              <MetricCell label="Median" value={formatScore(armMetric.medianValue, 4)} emphasis />
+              <MetricCell label="Mean" value={formatScore(armMetric.meanValue, 4)} />
+              <MetricCell
+                label="Shrunk mean"
+                value={formatScore(armMetric.shrunkMeanValue, 4)}
+                hint={
+                  pooledMeanValue === null
+                    ? 'no pooled mean to shrink toward'
+                    : `pulled toward ${formatScore(pooledMeanValue, 4)} (pooled over ${formatNumber(totalMetricValues ?? 0)})`
+                }
+              />
+              <MetricCell label="p75 / p90" value={`${formatScore(armMetric.p75, 3)} / ${formatScore(armMetric.p90, 3)}`} />
+            </div>
+          )}
+          {valueCount === 0 ? null : armMetric.tailStatisticsMeaningful === false ? (
             <p className="mt-2 text-xs leading-relaxed text-warning">
               ⚠ Too few outcomes in this arm for the tail statistics to mean anything — the percentiles above are printed, not
               estimated.
@@ -631,11 +739,22 @@ function ArmCard({
   );
 }
 
-function MetricCell({ label, value, emphasis }: { label: string; value: string; emphasis?: boolean }) {
+function MetricCell({
+  label,
+  value,
+  emphasis,
+  hint,
+}: {
+  label: string;
+  value: string;
+  emphasis?: boolean;
+  hint?: string;
+}) {
   return (
     <div>
       <div className="text-ink-subtle">{label}</div>
       <div className={'tnum ' + (emphasis ? 'font-medium text-ink' : 'text-ink-muted')}>{value}</div>
+      {hint && <div className="tnum text-[0.6875rem] leading-tight text-ink-subtle">{hint}</div>}
     </div>
   );
 }
@@ -683,7 +802,7 @@ function BanditPanel({ arms }: { arms: BanditArmView[] }) {
           <tbody>
             {arms.map((arm, i) => {
               const n = arm.n ?? 0;
-              const mean = arm.posteriorMean ?? 0;
+              const mean = arm.posteriorMean;
               return (
                 <tr key={arm.key ?? i}>
                   <Td className="text-ink">
@@ -693,8 +812,11 @@ function BanditPanel({ arms }: { arms: BanditArmView[] }) {
                     </div>
                   </Td>
                   <Td align="right" className="min-w-[7rem]">
-                    <div className="tnum text-ink">{formatPercent(mean, 1)}</div>
-                    <ScoreBar value={mean} tone="accent" className="mt-1" />
+                    <div className="tnum text-ink">{mean === undefined ? '—' : formatPercent(mean, 1)}</div>
+                    {mean !== undefined && <ScoreBar value={mean} tone="accent" className="mt-1" />}
+                    {n === 0 && (
+                      <div className="whitespace-normal text-xs leading-tight text-ink-subtle">prior only — untried</div>
+                    )}
                   </Td>
                   <Td align="right" className="tnum">
                     {arm.lower === undefined || arm.upper === undefined

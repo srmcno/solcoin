@@ -519,7 +519,9 @@ Two more things about automatic sweeps, if you turn them on:
 - They need **both** `wallet.autoSweepEnabled` (default `false`) and
   `autonomy.wallet_transfer === 'auto'` (default `off`, and `auto` is only
   reachable from phase 4 or 5), plus `wallet.treasuryAddress` set and a signing
-  key in this process.
+  key in this process. On the `simulation` network `wallet.transfer()` refuses
+  outright — there are no real funds to move — so the branch only ever does
+  anything on devnet or mainnet.
 - `evaluateSweep()` only fires above `wallet.sweepThresholdSol` (**1.0**) and
   leaves `wallet.operatingFloatSol` (**0.3**) behind, so the smallest sweep it can
   propose is around **0.7 SOL** — which `guard.checkSpend` then rejects against

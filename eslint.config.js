@@ -52,6 +52,48 @@ export default tseslint.config(
     },
   },
 
+  // The shared package is the deterministic core: given the same inputs it must
+  // produce the same scores, on any machine, at any time. That is what makes
+  // its tests meaningful and what lets a stored prediction be re-derived later.
+  // The constraint used to be upheld by convention alone.
+  {
+    files: ['packages/shared/src/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'fs', 'path', 'crypto', 'http', 'https', 'os', 'child_process'],
+              message:
+                'The shared package performs no I/O. Anything that needs the filesystem, the network or node crypto belongs in @solcoin/server.',
+            },
+          ],
+        },
+      ],
+      'no-restricted-globals': [
+        'error',
+        { name: 'fetch', message: 'The shared package performs no I/O.' },
+        { name: 'process', message: 'The shared package reads no ambient state; pass configuration in.' },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.object.name='Date'][callee.property.name='now']",
+          message: 'Time is always a parameter here, so a scored result can be reproduced later. Take a `nowMs` argument.',
+        },
+        {
+          selector: "NewExpression[callee.name='Date'][arguments.length=0]",
+          message: 'Time is always a parameter here. Take a `nowMs` argument.',
+        },
+        {
+          selector: "CallExpression[callee.object.name='Math'][callee.property.name='random']",
+          message: 'Randomness comes from the seeded RNG in math/random.ts, so a simulation can be replayed.',
+        },
+      ],
+    },
+  },
+
   // Server: pino is the logger. A stray console call bypasses redaction and
   // can put a secret into stdout, so it is an error rather than a nit. The few
   // places whose entire job is writing to a terminal — the CLIs, the build

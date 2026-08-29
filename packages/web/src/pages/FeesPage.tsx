@@ -43,6 +43,8 @@ import { useSession } from '@/lib/session';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const AXIS_STYLE = { fill: 'var(--color-ink-subtle)', fontSize: 11 } as const;
+/** The server caps /api/fees history at this many rows. */
+const HISTORY_LIMIT = 100;
 
 interface FeeTotals {
   collectedSol?: number | null;
@@ -199,6 +201,10 @@ export function FeesPage() {
   // the platform is currently running against. Layout already holds this query.
   const status = useApiQuery<SystemStatus>(queryKeys.systemStatus, '/api/system/status', { refetchInterval: POLL.fast });
   const network = status.data?.network ?? 'mainnet';
+  // Running on simulation, the current network tells us nothing about which
+  // chain an older on-chain row belongs to, so no explorer link can be trusted
+  // for any row and none is offered.
+  const explorerAvailable = network !== 'simulation';
 
   const collect = useApiMutation<{ ok?: boolean; collectedSol?: number; signature?: string }, void>('/api/fees/collect', {
     invalidate: [queryKeys.fees, queryKeys.feesByToken, queryKeys.wallet],
@@ -231,6 +237,19 @@ export function FeesPage() {
   }, [history]);
 
   const tokenTotal = useMemo(() => tokens.reduce((sum, t) => sum + num(t.totalSol), 0), [tokens]);
+
+  // creator_fee_events.source is written as 'simulation' whenever the claim was
+  // executed by the simulation adapter: the signature is fabricated, no SOL
+  // moved, and no such transaction exists on any chain. The server computes the
+  // totals over every collection row, so they include these — which has to be
+  // said out loud rather than left for the operator to notice.
+  const simulatedCollections = useMemo(
+    () => history.filter((row) => row.source === 'simulation').length,
+    [history],
+  );
+  const historyTruncated = history.length >= HISTORY_LIMIT;
+  // Rows the chart had to drop because they carry no usable timestamp.
+  const undatedCollections = history.length - series.length;
 
   const canCollect = can('collect_fees');
   const shouldCollect = decision?.shouldCollect === true;
@@ -297,6 +316,20 @@ export function FeesPage() {
 
       <AutonomyBanner autonomy={query.data?.autonomy} />
 
+      {simulatedCollections > 0 && (
+        <Note tone="warning">
+          <span aria-hidden="true">◇</span>{' '}
+          <strong>
+            {simulatedCollections} of the {history.length} recorded collection{history.length === 1 ? '' : 's'} below{' '}
+            {simulatedCollections === 1 ? 'was' : 'were'} simulated.
+          </strong>{' '}
+          A simulated claim is executed against the simulation adapter: its signature is fabricated, no SOL moved, and
+          no matching transaction exists on any chain — so those rows carry no explorer link. The totals and the chart
+          on this page are computed over every recorded collection and therefore include them. Treat these figures as a
+          rehearsal of the collection logic, not as revenue, until the platform runs against a real network.
+        </Note>
+      )}
+
       {!canCollect && (
         <Note>
           Collecting fees requires the <strong>collect_fees</strong> permission, which your account does not have. Every
@@ -322,26 +355,35 @@ export function FeesPage() {
           tone={num(totals?.collectedSol) > 0 ? 'positive' : 'neutral'}
           hint={`${formatNumber(collectionCount)} collection ${collectionCount === 1 ? 'transaction' : 'transactions'}`}
         />
-        <StatTile label="Today" value={formatSol(totals?.collectedTodaySol)} hint="Since local midnight" />
+        <StatTile label="Today" value={formatSol(totals?.collectedTodaySol)} hint="Rolling last 24 hours" />
         <StatTile label="Last 7 days" value={formatSol(totals?.collected7dSol)} hint="Rolling window" />
         <StatTile label="Last 30 days" value={formatSol(totals?.collected30dSol)} hint="Rolling window" />
         <StatTile
           label="Outstanding"
           value={formatSol(totals?.outstandingSol)}
           tone={num(totals?.outstandingSol) > 0 ? 'accent' : 'neutral'}
-          hint="Claimable on chain right now, excluding rent"
+          hint="From the last accrual snapshot, after rent"
         />
       </div>
 
       {/* The single most misread number on this page: the vault never empties. */}
       <Note tone={strandedRent > 0 ? 'warning' : 'neutral'}>
         <strong>
-          {strandedRent > 0 ? `${formatSol(strandedRent)} is stranded rent and is not recoverable.` : 'About stranded rent.'}
+          {strandedRent > 0
+            ? `About ${formatSol(strandedRent)} is stranded rent and is not recoverable.`
+            : 'About stranded rent.'}
         </strong>{' '}
         The bonding-curve creator vault is a rent-exempt Solana account: it must permanently retain a minimum balance to
         exist at all. That minimum can never be claimed, so the vault balance you see in an explorer and the claimable
         amount shown here will never agree. This is not a bug, a failed claim, or lost revenue in transit — it is the
         cost of holding the account open. Outstanding above already excludes it.
+        {strandedRent > 0 && (
+          <>
+            {' '}
+            The figure is an estimate, not a measurement: it is the standard rent-exempt minimum multiplied by the
+            number of distinct curve vaults this platform has ever snapshotted.
+          </>
+        )}
       </Note>
 
       <div className="grid gap-4 xl:grid-cols-3">
@@ -366,8 +408,27 @@ export function FeesPage() {
         <Card>
           <SectionHeader
             title="Collection history"
-            description="Each claim transaction the platform has submitted, newest first. Network fee is what the claim itself cost."
+            description={`Each claim transaction the platform has submitted, newest first. Network fee is what the claim itself cost. Showing ${history.length} ${history.length === 1 ? 'claim' : 'claims'}.`}
           />
+
+          {(historyTruncated || undatedCollections > 0) && (
+            <div className="mt-3 space-y-2">
+              {historyTruncated && (
+                <Note>
+                  This is the most recent {HISTORY_LIMIT} claims, which is all the API returns. Older claims exist but
+                  are not listed or charted here; the totals above are computed server-side over every claim ever
+                  recorded, so they do not match the sum of this table.
+                </Note>
+              )}
+              {undatedCollections > 0 && (
+                <Note tone="warning">
+                  {undatedCollections} of these {history.length} claims {undatedCollections === 1 ? 'has' : 'have'} no
+                  usable timestamp, so {undatedCollections === 1 ? 'it is' : 'they are'} excluded from the chart below.{' '}
+                  {undatedCollections === 1 ? 'It is' : 'They are'} still listed in the table.
+                </Note>
+              )}
+            </div>
+          )}
           {series.length >= 2 ? (
             <div className="mt-4 h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
@@ -466,6 +527,9 @@ export function FeesPage() {
                     const fee = toSol(row.network_fee_lamports);
                     const net = claimed - fee;
                     const usd = maybeNum(row.usd_value);
+                    // A simulated claim never touched a chain, so its signature
+                    // must not be dressed up as an explorer link.
+                    const simulated = row.source === 'simulation';
                     return (
                       <tr key={row.id ?? `${row.transaction_signature ?? 'row'}-${index}`} className="hover:bg-surface-hover/40">
                         <Td>
@@ -496,9 +560,33 @@ export function FeesPage() {
                             <span className="text-ink-subtle" title="Wallet-level claim covering every token">wallet-level</span>
                           )}
                         </Td>
-                        <Td className="text-ink-subtle">{humanise(row.source ?? null)}</Td>
                         <Td>
-                          {row.transaction_signature ? (
+                          {simulated ? (
+                            <Badge tone="warning">
+                              <span aria-hidden="true">◇</span> Simulated
+                            </Badge>
+                          ) : (
+                            <span className="text-ink-subtle">{humanise(row.source ?? null)}</span>
+                          )}
+                        </Td>
+                        <Td>
+                          {!row.transaction_signature ? (
+                            <span className="text-ink-subtle">—</span>
+                          ) : simulated ? (
+                            <span
+                              className="font-mono text-xs text-ink-subtle"
+                              title="Fabricated by the simulation adapter — this signature does not exist on any chain"
+                            >
+                              {truncateAddress(row.transaction_signature, 6)} (not on chain)
+                            </span>
+                          ) : !explorerAvailable ? (
+                            <span
+                              className="font-mono text-xs text-ink-subtle"
+                              title="The platform is running on simulation, so which chain this older claim belongs to is not recorded — no explorer link can be built for it"
+                            >
+                              {truncateAddress(row.transaction_signature, 6)}
+                            </span>
+                          ) : (
                             <a
                               className="text-accent-soft hover:underline"
                               href={solscanUrl('tx', row.transaction_signature, network)}
@@ -507,8 +595,6 @@ export function FeesPage() {
                             >
                               {truncateAddress(row.transaction_signature, 6)}
                             </a>
-                          ) : (
-                            <span className="text-ink-subtle">—</span>
                           )}
                         </Td>
                       </tr>
@@ -524,7 +610,11 @@ export function FeesPage() {
       <Card>
         <SectionHeader
           title="Fees by token"
-          description="Which launches have actually earned. Sorted by lifetime fees, accrued plus collected."
+          description={
+            tokens.length > 0
+              ? `Which launches have actually earned. ${tokens.length} ${tokens.length === 1 ? 'token has' : 'tokens have'} earned a fee, sorted by lifetime fees — accrued plus collected. Tokens that have never earned anything are not listed.`
+              : 'Which launches have actually earned. Sorted by lifetime fees, accrued plus collected.'
+          }
         />
 
         <div className="mt-3 space-y-3">
@@ -558,6 +648,9 @@ export function FeesPage() {
                 {tokens.map((token, index) => {
                   const total = num(token.totalSol);
                   const share = tokenTotal > 0 ? total / tokenTotal : 0;
+                  // A token with no network recorded predates the column and is
+                  // treated as simulated, matching the tokens list.
+                  const simulated = (token.network ?? 'simulation') === 'simulation';
                   return (
                     <tr key={token.mint ?? index} className="hover:bg-surface-hover/40">
                       <Td>
@@ -569,6 +662,13 @@ export function FeesPage() {
                           <span className="text-ink-subtle">Unknown mint</span>
                         )}
                         {token.name && token.symbol && <div className="truncate text-xs text-ink-subtle">{token.name}</div>}
+                        {simulated && (
+                          <div className="mt-1">
+                            <Badge tone="warning">
+                              <span aria-hidden="true">◇</span> Simulated — no on-chain token exists
+                            </Badge>
+                          </div>
+                        )}
                       </Td>
                       <Td>
                         <Badge tone={lifecycleTone(token.lifecycle)}>{humanise(token.lifecycle ?? 'unknown')}</Badge>

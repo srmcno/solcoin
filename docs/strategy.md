@@ -219,6 +219,7 @@ the event loop.
 | `acceleration` | `(slope of newer half − slope of older half) / max(0.25, spanHours/2)`, per hour² |
 | `consistency` | `0.5 × r² of the log-linear fit + 0.5 × fraction of non-negative first differences` |
 | `spanHours`, `n` | Coverage of the series |
+| `rateEstimable` | `false` when `n < 2` or `spanHours < 0.5` (`MIN_SPAN_HOURS`) — the rate is unknown, not zero |
 
 `relativeVelocity` is what the model and the opportunity score use;
 `velocity` is a presentational rescaling. Note that the `velocity` **column** on
@@ -230,10 +231,31 @@ line even if it points downward; the positive-fraction term rewards monotone
 growth even when it is noisy. A trend that doubles, halves and doubles again
 scores poorly on both.
 
-**One thing the code does not do that the comment suggests it does:**
-`computeKinetics` computes a `baseline` (the 25th percentile of the series, "a
-stable quiet level") and then never uses it. `velocity` is scaled by the latest
-value instead. This is dead code, not a hidden normalisation.
+### Unknown is not zero, and the guards around it
+
+Several sources are polled together, so a freshly discovered trend can have five
+observations spread across two seconds. Fitting a per-hour slope to that divides
+by a near-zero time delta and produces an enormous, meaningless velocity, which
+then ranks a trend seen once above a genuine four-platform wave. Three guards
+exist:
+
+- **`MIN_SPAN_HOURS = 0.5`.** Below that span `computeKinetics` returns zeros
+  with `rateEstimable: false`. That flag is the important part: downstream code
+  must read it as "unknown", not as "flat" (section 4 shows what the opportunity
+  score does with it).
+- **Pair minimum.** `theilSenSlope` is called with `minDx = MIN_SPAN_HOURS / 4`,
+  so individual pairs closer than 7.5 minutes are skipped even inside a
+  long-enough series.
+- **`MAX_RELATIVE_VELOCITY = 2.0`.** The slope is clamped to ±2.0 (already ~7×
+  per hour sustained) and `acceleration` is clamped to ±1, so a counter reset or
+  a backfill landing all at once cannot capture the ranking.
+
+Note that the field comment on `relativeVelocity` and the `computeKinetics`
+docstring both describe the growth rate as being "relative to the series
+baseline". No baseline is computed anywhere in the function — the slope is taken
+on `log1p` values, which is what makes it comparable across sources, and
+`velocity` is scaled by the latest value rather than by a baseline. The comment
+is stale; the behaviour is the one described in the table above.
 
 ### Phase classification
 
@@ -241,7 +263,7 @@ value instead. This is dead code, not a hidden normalisation.
 
 | Condition (evaluated in order) | Phase |
 |---|---|
-| `n < 3` or `spanHours < 1` | `nascent` |
+| `!rateEstimable`, or `n < 3`, or `spanHours < 1` | `nascent` |
 | `relativeVelocity > 0.05` and `acceleration >= -0.01` | `emerging` if `ageHours < 72`, otherwise `peaking` |
 | `relativeVelocity > 0.005` | `peaking` |
 | `relativeVelocity < -0.02` | `declining` |
@@ -251,11 +273,14 @@ value instead. This is dead code, not a hidden normalisation.
 +230% per day), not yet decelerating, and less than three days old. The 72-hour
 cut is the whole thesis expressed as a boolean.
 
-Be aware of the final row: a completely flat trend with any non-zero level is
-classified `peaking`, not `dormant`. `dormant` is reachable only at zero level.
-This makes `peaking` the catch-all bucket, and the phase label should be read
-with that in mind. It matters mainly through lifespan estimation, since the
-opportunity score does not use the phase directly.
+Two rows deserve care. The first row means `nascent` covers both "genuinely new"
+and "watched for less than half an hour, so nothing is known" — the two are not
+distinguished by the label, only by `rateEstimable`. And the final row means a
+completely flat trend with any non-zero level is classified `peaking`, not
+`dormant`; `dormant` is reachable only at zero level. That makes `peaking` the
+catch-all bucket, and the phase label should be read with that in mind. It
+matters mainly through lifespan estimation, since the opportunity score does not
+use the phase directly.
 
 ### Lifespan estimation
 
@@ -287,11 +312,13 @@ accumulate that head is itself just this judgement re-encoded.
 The question being answered: *is there a rising wave of attention here that
 nobody has tokenised yet, and is there enough of it left to matter?*
 
-Ten components, each normalised to `[0,1]`, combined through a weighted logit.
-The logit form is not decoration: it means every weight is in the same unit
-(log-odds per unit of a `[0,1]` component), so weights are directly comparable
-across components, individually explainable as contributions, and learnable by
-the same machinery as the prediction heads if that is ever wired up.
+Ten components, each normalised to `[0,1]`, combined through a weighted logit
+and then passed through **two multiplicative gates** — one for crowding, one for
+strength of growth evidence. The logit form is not decoration: it means every
+weight is in the same unit (log-odds per unit of a `[0,1]` component), so weights
+are directly comparable across components, individually explainable as
+contributions, and learnable by the same machinery as the prediction heads if
+that is ever wired up.
 
 ### Components
 
@@ -311,10 +338,21 @@ the same machinery as the prediction heads if that is ever wired up.
 
 where `logScale01(x, full) = log1p(x) / log1p(full)`, clamped to `[0,1]`.
 
+The first three components are only computed when `kinetics.rateEstimable` is
+true. When it is false — fewer than two observations, or a span under half an
+hour — all three are set to `UNMEASURED_RATE_CREDIT = 0.12` instead, and the
+score's rationale says so in words. This is deliberately *low* rather than
+neutral: a trend observed once has no measurable growth, and "we cannot tell
+whether this is rising" is a reason to rank it below a trend that has been
+watched climbing, not to award it what an average riser would get. Scoring the
+unknown as average is how a system ends up spending money on trends it has seen
+exactly once.
+
 The `velocity` sigmoid is centred at 2% growth per hour with a scale of 0.045,
 so 2%/h scores 0.5, 6.5%/h scores about 0.73, and 10%/h scores about 0.86. (The
-code comment beside that line describes 0.10/h as "≈ +170%/day"; compounded, it
-is closer to +900%/day. The threshold is what matters, not the gloss.)
+code comment beside that line describes 0.10/h as "roughly +170%/day". Since
+`relativeVelocity` is a log slope, 0.10/h is `e^(0.1 × 24) ≈ 11×` a day, nearer
++1000%. The threshold is what matters, not the gloss.)
 `earliness` has a 60-hour time constant: at 24 hours old a
 trend retains 67% of its earliness, at 72 hours 30%, at 120 hours 13%. Together
 with the `maxTrendAgeHours` gate (default 96) this is the mechanism that makes
@@ -328,16 +366,56 @@ sighting (0.357) as most of the way to a strong signal.
 ### Combination
 
 ```
-logit = bias + Σ weight_i × component_i
+logit    = bias + Σ weight_i × component_i
 rawScore = logistic(logit) × 100
-saturationMultiplier = (1 − saturation) ^ saturationExponent          # default exponent 1.6
-score = rawScore × saturationMultiplier
+
+saturationMultiplier = (1 − saturation) ^ saturationExponent      # default exponent 1.6
+
+evidence             = 0.55 × velocity + 0.25 × acceleration + 0.20 × consistency
+evidenceMultiplier   = evidenceFloor + (1 − evidenceFloor) × evidence   # default floor 0.3
+
+score = rawScore × saturationMultiplier × evidenceMultiplier
 ```
 
 With all ten components at 0.5 the logit is `−2.6 + 3.925 = 1.325`, giving a raw
 score of about 79. With every component at 1 the raw score is 99.5; at 0 it is
-6.9. The bias is set so that a mediocre trend does not automatically clear the
-default gate of 58 once saturation is applied.
+6.9.
+
+`rawScore` is not the score. That same all-at-0.5 trend has `evidence = 0.5` and
+therefore `evidenceMultiplier = 0.65`, so with zero saturation it scores about
+**51** — below the default launch gate of 58. The bias and the two multipliers
+are set together so that a merely mediocre trend does not clear the gate.
+
+The score is read at two different thresholds, in this order:
+
+| Threshold | Default | Setting | What it controls |
+|---|---|---|---|
+| Concept generation | 52 | `research.conceptGenerationThreshold` | Whether the trend is worth spending model calls on at all |
+| Launch | 58 | `qualityGate.minOpportunityScore` | Whether a resulting candidate may launch |
+
+`selectForGeneration` applies the first, alongside `qualityGate.maxTrendAgeHours`
+and a check that the trend has no live candidate already, ordering by score and
+taking a caller-supplied limit — the pipeline passes 3. Each surviving trend then
+gets `research.conceptsPerOpportunity` concepts (default 4). That mediocre
+51-point trend does not even get concepts generated for it.
+
+### The two multiplicative gates
+
+There are two halves to the thesis — "rising attention" and "that nobody has
+tokenised yet" — and each gets a multiplier rather than another additive term.
+
+**Growth evidence** (`evidenceMultiplier`) gates the first half. Audience size,
+novelty and earliness are all high for *every* freshly discovered item, so as
+additive terms they sum to a large constant that carries the score regardless of
+whether the trend is going anywhere. Gating on evidence means a large but static
+topic cannot outrank a smaller one that is demonstrably climbing. The floor of
+0.3 is what a trend with no growth evidence at all retains; the other 70% has to
+be earned. Combined with `UNMEASURED_RATE_CREDIT`, a trend seen once scores at
+most `0.3 + 0.7 × 0.12 ≈ 0.38` of its raw score.
+
+`OpportunityScore` exposes `rawScore`, `saturationMultiplier` and
+`evidenceMultiplier` separately, and the rationale strings name whichever gate
+did the cutting, so a low score can always be attributed.
 
 ### Why saturation is multiplicative, and why it has an exponent
 
@@ -350,7 +428,8 @@ worse" — as an opportunity for a *new* token, it is close to worthless no matt
 how large it is.
 
 Multiplying makes the penalty non-compensable. Nothing else in the score can
-raise `score` above `rawScore × (1 − saturation)^1.6`.
+raise `score` above `rawScore × (1 − saturation)^1.6` — the evidence gate is
+itself at most 1, so it can only lower that ceiling further.
 
 The exponent controls how convex that gate is. At 1.0 the penalty is linear; at
 1.6 moderate crowding is punished harder than a linear multiplier would:
@@ -363,9 +442,12 @@ The exponent controls how convex that gate is. At 1.0 the penalty is linear; at
 | 0.60 | 0.400 | 0.231 |
 | 0.80 | 0.200 | 0.076 |
 
-Both `rawScore` and `score` are persisted (`raw_opportunity_score` and
-`opportunity_score`), so an operator can always see how much of a low score is
-the trend itself and how much is the crowd.
+Both `rawScore` and `score` are persisted as columns
+(`raw_opportunity_score` and `opportunity_score`), and the whole
+`OpportunityScore` object — both multipliers, every component and every
+contribution — is stringified into `score_breakdown` alongside the kinetics. So
+an operator can always see how much of a low score is the trend itself, how much
+is the crowd, and how much is missing growth evidence.
 
 Two honest caveats:
 
@@ -530,6 +612,14 @@ risk flag at **`block` severity**, and the quality gate treats it as a hard bloc
 that the exploration path cannot relax (`qualityGate.blockOnHardCollision`,
 default `true`).
 
+One thing that setting does not do, despite its name: turning it off does not let
+a colliding candidate through. It only skips the gate's dedicated
+"Name/ticker collision" check. The `block`-severity `name_collision` flag is still
+raised by `concept.service.ts` and is still caught by the gate's safety screen,
+which runs first and is not conditional on anything. Switching
+`blockOnHardCollision` off therefore changes the rejection *reason* from
+`duplicate_concept` to `safety_block`, not the outcome.
+
 Note also that semantic similarity, however high, never triggers a hard
 collision. That is intentional: semantic closeness means "the same idea", which
 is saturation. Name and ticker closeness means "traders confuse them", which is
@@ -574,24 +664,27 @@ turns that into a `low_quality` flag at `block` severity.
 
 Naming patterns that saturate every token list, and their penalty weights:
 
+All are case-insensitive. Listed here by weight; the code declares them in a
+different order, which does not matter because every match is summed.
+
 | Pattern | Label | Weight |
 |---|---|---|
-| `\bmoon\|rocket\|lambo\|1000x\|100x\b` | price-promise language | 0.30 |
+| `\b(moon\|rocket\|lambo\|1000x\|100x)\b` | price-promise language | 0.30 |
 | `\b\w+\s?2\.0\b` | "2.0" derivative | 0.25 |
 | `\bsafe\w+` | "Safe X" pattern | 0.24 |
 | `\binu\b` | "Inu" suffix | 0.22 |
 | `\bbaby\s?\w+` | "Baby X" pattern | 0.20 |
 | `\belon\b` | Elon reference | 0.20 |
-| `\bdoge\|shib\|pepe\|bonk\|wif\b` | established mascot reuse | 0.18 |
+| `\b(doge\|shib\|pepe\|bonk\|wif)\b` | established mascot reuse | 0.18 |
 | `\bai\s?(coin\|token)\b` | generic "AI coin" | 0.18 |
-| `v?\d+\s*$` | numeric version suffix | 0.15 |
-| `\bgm\|wagmi\|hodl\|fomo\b` | generic crypto slang | 0.12 |
-| `\bking\|lord\|god\|based\|chad\|giga\b` | generic hype modifier | 0.10 |
+| `\bv?\d+\b\s*$` | numeric version suffix | 0.15 |
+| `\b(gm\|wagmi\|hodl\|fomo)\b` | generic crypto slang | 0.12 |
+| `\b(king\|lord\|god\|based\|chad\|giga)\s?\w*` | generic hype modifier | 0.10 |
 
-Weights are summed over all matches and capped at 0.75. The ordering encodes a
-view: price-promise language is worst because it is both the most generic and
-the closest to a compliance problem; hype modifiers are mildest because they can
-be part of a genuinely funny name. Note that this is an *originality* penalty
+Weights are summed over all matches and capped at 0.75. The relative weighting
+encodes a view: price-promise language is worst because it is both the most
+generic and the closest to a compliance problem; hype modifiers are mildest
+because they can be part of a genuinely funny name. Note that this is an *originality* penalty
 only — the separate risk lexicon
 (`packages/shared/src/safety/risk-lexicon.ts`) blocks explicit promises such as
 "will moon", "1000x guaranteed" or "risk-free" at `block` severity, but a bare
@@ -630,8 +723,9 @@ for digits. −0.12 when a ticker of 4 or more characters contains no vowel.
 
 These are heuristics about memorability, and they are the least defensible
 numbers in the scoring layer — nothing has validated them against outcomes. They
-enter the model as features with modest prior weights (0.22–0.34), which is the
-right place for a hunch: the learning loop can move them, and the notes they
+enter the model as features with modest prior weights (`name_quality` 0.22–0.34
+across the four heads, `ticker_quality` 0.15–0.24), which is the right place for
+a hunch: the learning loop can move them, and the notes they
 produce are shown to the operator as text rather than being hidden inside a
 score.
 
@@ -682,9 +776,17 @@ Disagreement above 0.45 also forces human review.
 `requiresHumanReview` is set when the candidate is blocked, when any risk flag
 fired, when disagreement exceeds 0.45, or when any role returned `reject`.
 
-The panel runs on the triage and generation tiers by default; only survivors
-reach the decision-tier model. That ordering is where the cost discipline in the
-pipeline lives.
+Each role declares its own model tier, and the tier is where the cost discipline
+sits: `creative_critic` runs on the cheap triage model, the other three on the
+mid generation model. Note that with the default role set — `skeptic`,
+`market_analyst`, `risk` — every panellist is on the generation tier, so the
+triage-tier saving only materialises if an operator adds `creative_critic`.
+
+**The decision tier is configured but unused.** `ai.decisionModel` (default
+`claude-opus-5`) is a real setting and `AiRouter` will route a `decision`-tier
+request to it, but no role and no service in the pipeline ever asks for that
+tier. There is no "only survivors reach the strongest model" step today; the
+strongest model is wired up and idle.
 
 ---
 
@@ -896,10 +998,12 @@ confidence = clamp(0.25
                    0.1, 0.95)
 ```
 
-With no training data and a mid-range breadth this is about 0.375, and the
-prediction service says so in text rather than only as a number. Confidence never
-reaches 1: the ceiling of 0.95 is a statement that this model does not get to be
-certain.
+With no training data and a mid-range breadth this is about 0.375. Confidence
+never reaches 1: the ceiling of 0.95 is a statement that this model does not get
+to be certain. `prediction.service.ts` computes and persists the number only —
+turning it into a sentence happens downstream, in the candidate detail page
+(which raises a warning banner below its low-confidence threshold) and in
+`notification.service.ts`.
 
 ---
 
@@ -1042,7 +1146,8 @@ graduated coin sits near the top of that curve. Fee parameters are read from
 chain at runtime elsewhere in the platform; these are the modelling defaults.
 
 Claim costs are modelled honestly but are nearly irrelevant at these
-magnitudes — twelve claims cost 0.00024 SOL against a launch cost of 0.029 SOL.
+magnitudes — the maximum of twelve claims costs 0.00024 SOL, against a total
+modelled cost of 0.029 SOL per launch (0.025 on-chain plus 0.004 of generation).
 The stage exists so that the arithmetic stays correct if fee-collection costs
 ever become material, not because it changes any current decision.
 
@@ -1111,7 +1216,9 @@ means anything.
 Settings live under `qualityGate.*` and `exploration.*`. The `min`/`max`
 construction means an operator who sets the main threshold *below* the
 exploration threshold does not accidentally make exploration stricter than
-exploitation.
+exploitation. The relaxations apply only when `exploration.enabled` (default
+`true`) is set *and* the per-concept draw described in section 13 comes up
+inside the current exploration rate.
 
 Only the two thresholds that encode the platform's *opinion* are relaxed —
 "this trend does not look good enough" and "this space looks crowded". The ones
@@ -1133,9 +1240,14 @@ rankScore   = evComponent × (0.55 + 0.20 × confidence + 0.15 × originality + 
 ```
 
 Expected value is the objective, so it is the multiplicand and everything else is
-a modifier bounded in `[0.55, 1.00]` — the tie-breakers can adjust a candidate's
-rank by at most 45% relative, and can never reorder two candidates whose EV
-differs by more than that.
+a modifier bounded in `[0.55, 1.00]` — the tie-breakers can cut a candidate's
+rank score by at most 45%. They therefore cannot reorder two candidates whose
+`tanh(ev × 40)` values differ by more than a factor of `1 / 0.55 ≈ 1.8`. Note
+that the bound is on the compressed `evComponent`, not on raw SOL: because `tanh`
+flattens out, two candidates well into the tail (say +0.05 and +0.10 SOL, mapping
+to 0.96 and 0.9993) are close enough in `evComponent` that the tie-breakers *can*
+swap them. The guarantee holds where the EV differences are small, which is where
+it matters.
 
 `tanh(ev × 40)` compresses EV into a comparable range before combining. Without
 it, EV in SOL is a small number (a good candidate might be +0.02) and the
@@ -1168,9 +1280,12 @@ the budget on candidates it correctly rejects is pure waste.
 explorationRate(totalLaunches) = clamp(max(floor, ceiling × halfLife / (halfLife + totalLaunches)), 0, 1)
 ```
 
-With the defaults the quality gate passes (`floor = exploration.minExplorationRate`
-= 0.1, `ceiling = exploration.maxExplorationRate` = 0.5) and the built-in
-`halfLife = 40`:
+The floor and ceiling are always supplied by the quality gate from settings
+(`exploration.minExplorationRate` = 0.1, `exploration.maxExplorationRate` = 0.5);
+`halfLife` is never passed, so the built-in 40 applies. (`explorationRate` also
+carries its own fallback defaults of 0.1 / 0.6 / 40 for callers that pass
+nothing, but the gate is the only caller and it always passes the first two.)
+With those values:
 
 | Launches so far | Exploration rate |
 |---|---|
@@ -1221,9 +1336,9 @@ The five default arms (`ensureDefaultArms`, dimension `exploration_strategy`):
 
 Each is a hypothesis about where the current model is systematically wrong.
 
-The UI exposes both the posterior interval and a UCB value
-(`mean + 1.4 × sqrt(log(max(2, totalPulls)) / n)`, with `n = 0` returning 1)
-because they answer different questions: the interval says how much is known, the
+The experiments page exposes both the posterior interval and a UCB value
+(`clamp(mean + 1.4 × sqrt(log(max(2, totalPulls)) / n), 0, 2)`, with `n = 0`
+returning 1) because they answer different questions: the interval says how much is known, the
 UCB says what is worth trying next. An untested arm has a wide interval *and* a
 high UCB, and reading only one of the two invites the wrong conclusion.
 
@@ -1561,7 +1676,8 @@ uncoupled bandit counters noted in section 13 matter more than they look.
 
 **Several constants have never been validated against anything.** The source
 independence weights, the lifespan base hours per phase, the name and ticker
-quality heuristics, the saturation exponent of 1.6, the mass knee of 2.5, the AMM
+quality heuristics, the saturation exponent of 1.6, the evidence floor of 0.3 and
+the 0.12 credit for an unmeasurable growth rate, the mass knee of 2.5, the AMM
 volume multiplier range of 1.5–5.5×. Each is an argued judgement. With enough
 outcomes, each could be fitted — the source weights against whether multi-family
 confirmation actually predicts holders, the lifespan curve against realised
@@ -1605,7 +1721,9 @@ platform most wants to avoid — it fires before the competing tokens exist.
 | Source-diversity knee | 1.8 | `server/src/services/trend.service.ts` |
 | `SOURCE_INDEPENDENCE` | table | `shared/src/domain/enums.ts` |
 | `LOCAL_EMBEDDING_DIM` | 384 | `shared/src/text/embedding.ts` |
-| `DEFAULT_OPPORTUNITY_WEIGHTS` | table, bias −2.6, exponent 1.6 | `shared/src/scoring/opportunity.ts` |
+| `DEFAULT_OPPORTUNITY_WEIGHTS` | table, bias −2.6, saturation exponent 1.6, evidence floor 0.3 | `shared/src/scoring/opportunity.ts` |
+| `UNMEASURED_RATE_CREDIT` | 0.12 | `shared/src/scoring/opportunity.ts` |
+| `MIN_SPAN_HOURS`, `MAX_RELATIVE_VELOCITY` | 0.5 h, 2.0 | `shared/src/math/timeseries.ts` |
 | `SIMILARITY_FLOOR` | 0.42 | `shared/src/scoring/saturation.ts` |
 | `HARD_COLLISION_THRESHOLD` | 0.88 | `shared/src/scoring/saturation.ts` |
 | Saturation mass knee | 2.5 | `shared/src/scoring/saturation.ts` |
@@ -1618,7 +1736,8 @@ platform most wants to avoid — it fires before the competing tokens exist.
 | Shrinkage half-life | 25 observations | `shared/src/model/linear.ts` |
 | `MONTE_CARLO_DRAWS` | 4000 | `shared/src/model/predict.ts` |
 | `DEFAULT_ECONOMICS` | 30 bps curve / 60 bps AMM, 0.025 + 0.004 SOL | `shared/src/model/predict.ts` |
-| Exploration floor / ceiling / half-life | 0.1 / 0.5 / 40 | `shared/src/bandit/thompson.ts`, `shared/src/domain/settings.ts` |
+| Exploration floor / ceiling (settings) | 0.1 / 0.5 | `shared/src/domain/settings.ts` |
+| Exploration half-life (built in, never overridden) | 40 | `shared/src/bandit/thompson.ts` |
 | Arm prior | `Beta(1, 3)` | `shared/src/bandit/thompson.ts`, `server/src/db/schema.ts` |
 | Outcome horizons | 24 / 72 / 168 h | `server/src/services/learning.service.ts` |
 | Recency half-life | 30 days | `server/src/services/learning.service.ts` |
@@ -1628,6 +1747,7 @@ platform most wants to avoid — it fires before the competing tokens exist.
 | `MIN_RELIABLE_N`, `SHRINK_STRENGTH` | 8, 5 | `server/src/services/analytics.service.ts` |
 | `MIN_CORRELATION_N` | 20 | `server/src/services/analytics.service.ts` |
 | Quality-gate defaults | 58 / 0.62 / 0.45 / 0.18 / 0.0 / 0.12 / 2 / 96 h | `shared/src/domain/settings.ts` |
+| `conceptGenerationThreshold` | 52 | `shared/src/domain/settings.ts` |
 
 See [Configuration](configuration.md) for how to change the tunable ones, and
 [Architecture](architecture.md) for how these components are wired together.

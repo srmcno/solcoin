@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Badge,
   Card,
@@ -13,7 +13,6 @@ import {
   Tabs,
   Td,
   Th,
-  type Tone,
 } from '@/components/ui';
 import { formatDateTime, formatNumber, formatRelative, humanise } from '@/lib/format';
 import { POLL, queryKeys, useApiMutation, useApiQuery } from '@/lib/queries';
@@ -329,10 +328,30 @@ export function SettingsPage() {
 
   const server = settingsQuery.data?.settings;
 
+  /*
+   * The settings the draft is currently diffed against.
+   *
+   * Not every write to settings comes from this form: engaging the emergency
+   * stop goes through its own endpoint and lands in the same document. Simply
+   * refusing to touch an existing draft left `emergencyStop` stale in it — the
+   * Danger zone would keep reading "Not engaged" while the save bar offered an
+   * unsaved change the operator never made, and saving it would have released
+   * the stop. So a new server document is adopted wholesale, then the paths the
+   * operator has actually edited are re-applied on top.
+   */
+  const adopted = useRef<Obj | null>(null);
+
   useEffect(() => {
-    if (!server) return;
+    if (!server || adopted.current === server) return;
+    const previous = adopted.current;
+    adopted.current = server;
     setBaseline(server);
-    setDraft((current) => current ?? server);
+    setDraft((current) => {
+      if (!current || !previous) return server;
+      let next = server;
+      for (const path of diffPaths(previous, current)) next = setAt(next, path, getAt(current, path));
+      return next;
+    });
   }, [server]);
 
   const changedPaths = useMemo(() => (baseline && draft ? diffPaths(baseline, draft) : []), [baseline, draft]);
@@ -342,7 +361,6 @@ export function SettingsPage() {
       get: (path) => getAt(draft, path),
       set: (path, value) => setDraft((current) => (current ? setAt(current, path, value) : current)),
       changed: (path) => changedPaths.some((p) => p === path || p.startsWith(`${path}.`)),
-      readOnly: false,
     }),
     [draft, changedPaths],
   );
@@ -590,6 +608,17 @@ function SaveBar({
   );
 }
 
+/**
+ * A settings value as the receipt should show it. `str()` on an array or an
+ * object renders "[object Object]", which tells the operator nothing about what
+ * they just changed.
+ */
+function renderValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '∅';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
 function SaveReceipt({ result, onDismiss }: { result: SaveResponse; onDismiss: () => void }) {
   const changed = result.changed ?? [];
   const sensitive = result.sensitiveChanges ?? [];
@@ -608,7 +637,7 @@ function SaveReceipt({ result, onDismiss }: { result: SaveResponse; onDismiss: (
                   key={`${str(entry.path)}-${index}`}
                   className="chip border border-border bg-surface font-mono text-[10px] text-ink-muted"
                 >
-                  {str(entry.path)}: {str(entry.from) || '∅'} → {str(entry.to) || '∅'}
+                  {str(entry.path)}: {renderValue(entry.from)} → {renderValue(entry.to)}
                 </span>
               ))}
             </div>
@@ -691,8 +720,30 @@ function NumberField({
 }) {
   const id = `f-${path}`;
   const raw = maybeNum(ctl.get(path));
+
+  /*
+   * The input holds its own text.
+   *
+   * Binding `value` straight to the parsed number breaks two things that matter
+   * on a page of spend limits. A half-typed decimal ("0.") parses to 0 and gets
+   * rewritten under the cursor, so 0.05 is genuinely hard to type; and clearing
+   * the field to retype it wrote a real 0 into the draft, which on
+   * `limits.maxSolSpendPerDay` is a silent, saveable change the operator never
+   * asked for. Keeping the text separate means nothing is written until what is
+   * typed is actually a number.
+   */
+  const [text, setText] = useState(raw === null ? '' : String(raw));
+  const [syncedFrom, setSyncedFrom] = useState(raw);
+  if (raw !== syncedFrom) {
+    // The stored value moved without this input causing it: a save, a discard,
+    // or a fresh load. Adopt it.
+    setSyncedFrom(raw);
+    setText(raw === null ? '' : String(raw));
+  }
+
   const outOfRange =
     raw !== null && ((min !== undefined && raw < min) || (max !== undefined && raw > max));
+  const cleared = text.trim() === '';
 
   return (
     <FieldShell id={id} label={label} help={help} changed={ctl.changed(path)}>
@@ -705,12 +756,19 @@ function NumberField({
           min={min}
           max={max}
           step={step}
-          value={raw === null ? '' : raw}
+          value={text}
           aria-describedby={`${id}-range`}
           onChange={(e) => {
-            const next = e.target.value === '' ? null : Number(e.target.value);
-            ctl.set(path, next === null || !Number.isFinite(next) ? 0 : next);
+            const next = e.target.value;
+            setText(next);
+            const parsed = Number(next);
+            if (next.trim() === '' || !Number.isFinite(parsed)) return;
+            // Remember what this input wrote, so the resync above only fires
+            // for a change that came from somewhere else.
+            setSyncedFrom(parsed);
+            ctl.set(path, parsed);
           }}
+          onBlur={() => setText(raw === null ? '' : String(raw))}
         />
         {unit && <span className="shrink-0 text-xs text-ink-subtle">{unit}</span>}
       </div>
@@ -718,6 +776,14 @@ function NumberField({
         Range {min ?? '—'} to {max ?? '—'}
         {unit ? ` ${unit}` : ''}
       </div>
+      {cleared && raw !== null && (
+        <div className="mt-1.5">
+          <Note tone="neutral">
+            An empty box is not saved as zero. The stored value ({raw}) stands until you type a new number, and comes
+            back when you leave the field.
+          </Note>
+        </div>
+      )}
       {outOfRange && (
         <div className="mt-1.5">
           <Note tone="warning">

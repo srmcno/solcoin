@@ -5,7 +5,7 @@ Configuration lives in three places, and the split is deliberate.
 | Layer | Holds | Edited via | Survives |
 |---|---|---|---|
 | Environment (`.env`) | Infrastructure only: where to listen, where the database is, and the one key that unlocks everything else | A text file, read at boot | Restart |
-| Encrypted secret store | Every credential: API keys, RPC URLs, webhook URLs, the wallet keystore | `PUT /api/system/secrets/:key`, Settings → Providers | The `secrets` table |
+| Encrypted secret store | Every credential: API keys, RPC URLs, webhook URLs, the wallet keystore | `PUT /api/system/secrets/:key`, Settings → Providers & secrets | The `secrets` table |
 | Platform settings | Every strategy and safety knob | `PATCH /api/settings`, Settings pages | The `settings` table, versioned, with full history |
 
 The reason for the split: environment variables cannot be changed without a
@@ -27,6 +27,13 @@ a half-understood configuration.
 variable already present in the real environment**, so a container's injected
 variables win over a stale file. Surrounding single or double quotes are
 stripped; nothing else is interpreted.
+
+One sharp edge in that starting point: the loader assigns an empty string for a
+line like `SOLCOIN_MASTER_KEY=`, and an empty string is *present*, not absent, so
+it is validated rather than defaulted. `SOLCOIN_MASTER_KEY=`, `BOOTSTRAP_EMAIL=`
+and `BOOTSTRAP_PASSWORD=` left empty fail `min(16)`, `email()` and `min(12)`
+respectively and the process refuses to start. Fill those three in or delete the
+lines; `WEB_DIST=`, `CORS_ORIGINS=` and the boolean flags are safe empty.
 
 | Variable | Default | Required | What it does |
 |---|---|---|---|
@@ -66,8 +73,13 @@ not leak the wallet key.
 **Generating one.**
 
 ```bash
-echo "SOLCOIN_MASTER_KEY=$(openssl rand -base64 32)" >> .env
+openssl rand -base64 32
 ```
+
+Paste the result into the existing `SOLCOIN_MASTER_KEY=` line. Do **not** append
+a second line with `>>`: within one file the loader keeps the *first* value it
+sees for a key, so an appended key loses to the empty line `.env.example` ships
+with, and the boot then fails the 16-character check.
 
 The schema enforces 16 characters. `npm run doctor` warns below 24 and advises 32
 or more. There is no upper bound.
@@ -122,9 +134,14 @@ So the safe rotation procedure is:
    (POST /api/wallet/export, exact confirmation phrase, audited).
 2. Run rotateMasterKey(newKey).
 3. Update SOLCOIN_MASTER_KEY in the environment and restart.
-4. Remove and re-import the operating wallet so its inner envelope is
-   rewritten under the new key.
+4. Re-import the operating wallet (POST /api/wallet/import) so its inner
+   envelope is rewritten under the new key.
 ```
+
+Step 4 is an import, not a create: `POST /api/wallet/create` refuses with
+`conflict` while a wallet exists, whereas import overwrites the keystore record
+in place. There is no route that removes a wallet — `WalletKeystore.remove()`
+exists but nothing calls it — so importing over the old record is the only path.
 
 Note that export returns `secretKeyBase64` while import expects base58 or a JSON
 byte array, so step 4 needs a conversion — decode the base64 to bytes and paste
@@ -135,8 +152,9 @@ the resulting `[...]` array.
 ## Credentials
 
 Stored under the keys in `SECRET_KEYS` (`packages/server/src/security/secrets.ts`).
-Reads are cached in memory for 60 seconds and stamp `lastUsedAt`, so an operator
-can see which credentials are actually being used and revoke the rest. Only
+Reads are cached in memory for 60 seconds; a read that misses the cache stamps
+`lastUsedAt`, so an operator can see which credentials are actually being used
+and revoke the rest — at 60-second granularity, not per call. Only
 metadata — key, category, a hint, timestamps — is ever returned over the API;
 plaintext never crosses the HTTP boundary.
 
@@ -175,7 +193,10 @@ be present:
   all of them are zero-auth. Two more zero-auth sources (`stackexchange`, `rss`)
   ship disabled and cost nothing to turn on.
 - **Market data** needs no credential — Jupiter, DexScreener and the pump.fun API
-  are all keyless.
+  are all keyless. Jupiter additionally looks for a `market.jupiter.api_key`
+  secret and switches to its paid tier and rate limit when it finds one; that key
+  is not declared in `SECRET_KEYS`, so it does not appear in the Providers UI and
+  has to be stored through `PUT /api/system/secrets/market.jupiter.api_key`.
 - **Metadata pinning** tries pump.fun's own IPFS endpoint first, which needs no
   credential; Pinata is the fallback.
 - **Artwork** falls back to deterministic procedural artwork when no image model
@@ -213,7 +234,7 @@ call and no model-driven update can exceed.
 | `maxSolPerTransactionAbsolute` | 2 | `limits.maxSolPerTransaction` |
 | `maxSolPerDayAbsolute` | 5 | `limits.maxSolSpendPerDay` |
 | `maxAiSpendUsdPerDayAbsolute` | 200 | `limits.maxAiSpendUsdPerDay` |
-| `maxTrendsPerDiscovery` | 500 | Divided across the enabled sources to give each provider its per-run limit |
+| `maxTrendsPerDiscovery` | 500 | Divided across the enabled sources to give each provider its per-run limit, with a floor of 10 each |
 | `maxConceptsPerCycle` | 40 | Declared but not referenced by any code path |
 
 **They are applied by clamping, not by rejection.** `clampSettings()` runs on
@@ -233,7 +254,8 @@ execution.devBuySol ≤ limits.maxSolPerTransaction
 
 So lowering `maxSolSpendPerDay` silently lowers `maxSolPerHour` with it, and
 `devBuySol` cannot exceed the per-transaction cap regardless of its own `max(5)`
-schema bound.
+schema bound. (`clampSettings` also pins `research.conceptsPerOpportunity` to 12,
+which is already its schema maximum, so that one never binds.)
 
 Zod bounds are a separate, earlier layer and *do* reject. `maxLaunchesPerDay`
 has a schema maximum of 50, so 40 is accepted-then-clamped to 24 while 60 is
@@ -367,20 +389,31 @@ but still respect the threshold and float.
 
 ### `fees`
 
-Creator fees accrue in wallet-level vaults; collection costs a transaction, so
-collecting too eagerly loses money.
+Creator fees accrue in **two vaults per creator wallet, not per token** — the
+bonding-curve vault and the AMM coin-creator vault — so a claim is a wallet
+operation and every setting below is evaluated per wallet, never per mint.
+Attributing the proceeds back to individual tokens is bookkeeping the fee
+service does after the fact. Collection costs a transaction, so collecting too
+eagerly loses money.
 
 | Field | Default | Range | Effect |
 |---|---|---|---|
 | `collectionThresholdSol` | `0.002` | ≥ 0 | Minimum claimable before a collection is considered. |
-| `minHoursBetweenCollections` | `6` | ≥ 0 | Per token. |
+| `minHoursBetweenCollections` | `6` | ≥ 0 | Minimum hours since the wallet's last collection. |
 | `minCollectionValueRatio` | `5` | ≥ 1 | Claim must recover at least this multiple of its estimated transaction cost. |
-| `forceCollectionIntervalHours` | `168` | ≥ 0 | Every token with any balance is swept once per this interval regardless of the ratio and interval checks. `0` disables the override. |
+| `forceCollectionIntervalHours` | `168` | ≥ 0 | Once fees have been accruing this long without being claimed, the threshold and ratio checks are waived. `0` disables the override. |
 
-The forced sweep bypasses the value-ratio and interval checks but not the
-threshold. Lower `minCollectionValueRatio` towards 2 if dust is accumulating
-faster than the weekly sweep clears it; raise it if collections are eating their
-own proceeds.
+The force interval waives the **threshold and the value-ratio** checks — not
+`minHoursBetweenCollections`, which still applies, and not the absolute
+never-pay-for-itself guard: a claim whose claimable balance does not exceed its
+estimated transaction cost is refused first, before any of these settings are
+consulted, forced or not. Note also that the bonding-curve vault permanently
+retains its rent-exempt minimum, so a small nonzero vault balance is not
+claimable at all.
+
+Lower `minCollectionValueRatio` towards 2 if dust is accumulating faster than
+the weekly sweep clears it; raise it if collections are eating their own
+proceeds.
 
 ### `monitoring`
 
@@ -411,11 +444,11 @@ these settings are the platform's main source of outbound request volume.
 | Field | Default | Range | Effect |
 |---|---|---|---|
 | `enabledSources` | `['google_trends','bluesky','mastodon','wikipedia','hackernews','gdelt']` | any `TrendSourceId` | Only these providers run during discovery. |
-| `discoveryIntervalMinutes` | `30` | ≥ 5 (integer) | Discovery job interval. |
+| `discoveryIntervalMinutes` | `30` | ≥ 5 (integer) | Discovery job interval. Read when the job is registered at boot — see below. |
 | `maxActiveTrends` | `400` | ≥ 10 (integer) | Working-set size for rescoring. |
 | `conceptGenerationThreshold` | `52` | 0–100 | Opportunity score a trend must reach to earn concept generation. Deliberately below `qualityGate.minOpportunityScore` — generation is cheap relative to the information it produces. |
 | `conceptsPerOpportunity` | `4` | 1–12 (integer) | Concepts generated per qualifying opportunity. |
-| `customSubreddits` | `[]` | strings | Extra subreddits for the Reddit provider (needs credentials). |
+| `customSubreddits` | `[]` | strings | Extra subreddits for the Reddit provider (needs credentials). Read once when the provider is constructed. |
 | `mastodonInstances` | `['mastodon.social','fosstodon.org','mstdn.social']` | strings | Polling more instances de-biases any single community. |
 | `googleTrendsRegions` | `['US','GB','CA','AU']` | region codes | Regions swept. |
 | `customRssFeeds` | `[]` | URLs (validated) | Feeds for the `rss` provider. |
@@ -427,10 +460,23 @@ source to `enabledSources` has no effect unless its provider registered at boot 
 `youtube` and `reddit` need credentials, and `x` has no provider implementation
 at all despite being a valid enum value.
 
-Changes to `googleTrendsRegions` and `mastodonInstances` are read when the
-provider registry is built; `customKeywords`, `customRssFeeds` and
-`customSubreddits` are read through closures on each use and take effect
-immediately.
+**When a change takes effect.** Only `customKeywords` (GDELT) and
+`customRssFeeds` (the RSS provider) are read through closures on every use and
+therefore apply immediately. `googleTrendsRegions`, `mastodonInstances` and
+`customSubreddits` are snapshotted when the provider registry is built, and the
+registry is rebuilt only at boot and whenever a secret is stored or deleted
+(`PUT`/`DELETE /api/system/secrets/:key`). Until one of those happens, editing
+them changes the stored settings and nothing else. The same applies to
+`ai.imageModel`, and to `execution.network`, which selects the RPC endpoints and
+launch adapters at registry-build time — switch the network and the matching
+adapter does not exist until the next rebuild, so a launch fails with
+`not_configured`. Restarting is the reliable way to apply any of these.
+
+`discoveryIntervalMinutes` is read once more narrowly still: the scheduler takes
+it when it registers the `trend-discovery` job at boot and reschedules from that
+in-memory value thereafter. `PATCH /api/jobs/trend-discovery` with an
+`intervalSeconds` shifts only the *next* run; the run after it returns to the
+boot-time interval. Restart to change it for good.
 
 ### `ai`
 
@@ -439,10 +485,10 @@ immediately.
 | `triageModel` | `claude-haiku-4-5-20251001` | string | Cheap tier: triage and classification. |
 | `generationModel` | `claude-sonnet-5` | string | Mid tier: candidate generation. |
 | `decisionModel` | `claude-opus-5` | string | Strong tier: the final launch decision. |
-| `imageModel` | `none` | string | `none` leaves the OpenAI image provider on its own default of `gpt-image-1`; any other value is passed through as the model id. It does **not** disable image generation. |
+| `imageModel` | `none` | string | `none` leaves the OpenAI image provider on its own default of `gpt-image-1`; any other value is passed through as the model id. It does **not** disable image generation, despite what the dashboard's help text for this field says. |
 | `panelEnabled` | `true` | boolean | The multi-agent evaluation panel. Costs more, decides better. |
 | `panelRoles` | `['skeptic','market_analyst','risk']` | subset of `skeptic`, `market_analyst`, `risk`, `creative_critic` | Roles run in the panel. `creative_critic` is available but off by default. |
-| `cacheTtlMinutes` | `240` | ≥ 0 (integer) | Identical prompts are served from cache. `0` disables caching. |
+| `cacheTtlMinutes` | `240` | ≥ 0 (integer) | Identical prompts are served from cache, but only for calls the caller marks cacheable or that run at temperature ≤ 0.3 — a deliberately varied call is never cached. `0` disables caching entirely. |
 | `maxConcurrentRequests` | `4` | 1–16 (integer) | Applied by a semaphore, resized on each call. |
 | `maxOutputTokens` | `4096` | ≥ 256 (integer) | Hard per-request ceiling. Callers may request less, never more. |
 
@@ -516,8 +562,10 @@ Two channel quirks:
   This is deliberate — it makes a misconfigured expectation visible in the
   delivery table rather than leaving you wondering why no mail arrives.
 
-A channel is used only when it is switched on *and* its credential exists;
-delivery uses `allSettled`, so a dead channel cannot cancel the others.
+A channel is used only when it is switched on *and* its credential exists —
+except email, which is selected by `emailEnabled` alone (no credential is ever
+read) and then skipped at delivery. Delivery uses `allSettled`, so a dead channel
+cannot cancel the others.
 
 ### `execution`
 
@@ -528,12 +576,15 @@ delivery uses `allSettled`, so a dead channel cannot cancel the others.
 | `devBuySol` | `0` | 0–5, clamped to `maxSolPerTransaction` | Optional developer buy at creation. `0` means create-only. |
 | `slippageBps` | `500` | 0–10000 (integer) | Slippage tolerance for the dev buy, in basis points. 500 = 5%. |
 | `priorityFeeMicroLamports` | `0` | ≥ 0 (integer) | `0` means auto-estimate. Non-zero overrides the estimate. |
-| `adapter` | `auto` | `auto`, `pumpportal_local`, `pumpfun_sdk`, `simulation` | `auto` picks the first registered adapter supporting the network. A named adapter that is unavailable or does not support the network falls back to `auto` behaviour rather than failing. |
+| `adapter` | `auto` | `auto`, `pumpportal_local`, `pumpfun_sdk`, `simulation` | `auto` picks the first registered adapter supporting the network. A named adapter that is unavailable or does not support the network falls back to `auto` behaviour rather than failing. Only two adapters are ever registered — `simulation`, and `pumpfun_sdk` on devnet and mainnet — so **`pumpportal_local` selects nothing** and behaves exactly like `auto`. |
 | `jitoTipSol` | `0` | ≥ 0 | **Not consumed by any code path.** No bundle submission exists. |
 | `commitment` | `confirmed` | `processed`, `confirmed`, `finalized` | **Not consumed by any code path.** The RPC client is constructed with `confirmed` unconditionally. |
 
 `network: simulation` always routes to the simulation adapter regardless of the
-`adapter` setting.
+`adapter` setting. Changing `network` does not itself rebuild the RPC endpoints
+or the launch adapters — those are built from the network in effect at the last
+provider-registry build, so restart after switching networks (see *When a change
+takes effect*, above).
 
 ### Top level
 
@@ -591,8 +642,8 @@ limits.maxSolSpendPerDay     qualityGate.blockOnHardCollision
 emergencyStop
 ```
 
-`isSensitiveSettingPath` matches a path or any prefix of it, so
-`autonomy.launch.anything` counts too.
+`isSensitiveSettingPath` matches a listed path exactly or any path beneath it,
+so `autonomy.launch.anything` counts too.
 
 **What the marking does.** Sensitive changes are written to the tamper-evident
 audit log as a single `settings.changed` entry carrying before/after values, the
@@ -629,7 +680,7 @@ preset combines `qualityGate` fields with `maxLaunchesPerDay`, which in live
 settings lives under `limits`. Compare them against your own history first, then
 apply the numbers by hand.
 
-| Setting | Conservative (*Selective*) | Balanced (shipped defaults) | Exploratory |
+| Setting | Selective | Balanced (shipped defaults) | Exploratory |
 |---|---|---|---|
 | `qualityGate.minOpportunityScore` | 72 | 58 | 45 |
 | `qualityGate.minOriginalityScore` | 0.75 | 0.62 | 0.5 |
@@ -643,7 +694,7 @@ apply the numbers by hand.
 | `qualityGate.humanReviewOnAnyRiskFlag` | true | true | true |
 | `limits.maxLaunchesPerDay` | 1 | 3 | 5 |
 
-**Conservative.** Thesis: creator fees are so concentrated in a few winners that
+**Selective.** Thesis: creator fees are so concentrated in a few winners that
 the only decision that matters is refusing the rest. Launch at most one token a
 day, only into fast-moving and largely unclaimed trends, and only when the model
 expects a clear positive return. Risk: with one launch a day and a tail-dominated
@@ -652,7 +703,7 @@ the per-launch cost, and the small sample it generates starves the model of the
 outcomes it needs to improve.
 
 **Balanced.** Thesis: the shipped defaults are a reasonable prior. Risk: it is a
-compromise, so it is beaten by Conservative in a market where only the very best
+compromise, so it is beaten by Selective in a market where only the very best
 candidates pay and by Exploratory in a market whose winners the current model
 cannot yet recognise — and it will not tell you which market you are in.
 
@@ -673,29 +724,40 @@ no excuse for it.
 
 ### Applying a profile
 
-Budgets are not part of the presets, and the ones that matter scale with launch
-count. If you move to Exploratory's five launches a day, `maxSolSpendPerDay` at
-its default of 0.5 becomes the real binding constraint long before the launch
-count does. Set the spend limits deliberately in the same patch:
+Budgets are not part of the presets, and whether they bind depends on
+`execution.devBuySol`. A launch reserves `devBuySol + 0.006 SOL`, so at the
+default dev buy of `0` even Exploratory's five launches a day reserve only 0.03
+SOL and `maxSolSpendPerDay` never binds. Put a 0.1 SOL dev buy behind those same
+five launches and the reservation is 0.53 SOL, which the default
+`maxSolSpendPerDay` of 0.5 refuses partway through the day — and the launch
+counter will look untouched while it happens. Set the spend limits in the same
+patch as the launch count.
 
-The API authenticates with an HttpOnly session cookie, so a `curl` example needs
-one — the dashboard's Settings pages are the ordinary path.
+The API authenticates with an HttpOnly session cookie, and every non-GET request
+must also carry the session's CSRF token in an `x-csrf-token` header
+(`GET /api/auth/session` returns it), so a `curl` example needs both — the
+dashboard's Settings pages are the ordinary path.
 
 ```bash
 curl -X PATCH http://127.0.0.1:4317/api/settings \
   -H 'content-type: application/json' \
-  -b "$SESSION_COOKIE" \
+  -H "x-csrf-token: $CSRF_TOKEN" \
+  -b "solcoin_session=$SESSION_TOKEN" \
   -d '{
     "patch": {
       "qualityGate": { "minOpportunityScore": 72, "minOriginalityScore": 0.75,
                        "maxSaturationScore": 0.28, "minProbabilityTenHolders": 0.32,
                        "minExpectedValueSol": 0.02, "minProbabilityProfitable": 0.25,
                        "minSourceBreadth": 3, "maxTrendAgeHours": 48 },
-      "limits": { "maxLaunchesPerDay": 1, "maxLaunchesPerHour": 1 }
+      "limits": { "maxLaunchesPerDay": 1, "maxLaunchesPerHour": 1,
+                  "maxSolSpendPerDay": 0.2, "maxSolPerHour": 0.2 }
     },
     "reason": "Moving to the Selective profile after 40 launches"
   }'
 ```
+
+That patch touches `qualityGate` and `limits`, so it needs `edit_limits` —
+owner or admin.
 
 Always read the `settings` object back from the response rather than assuming
 the patch applied verbatim — clamping is silent, and the relational clamps in
@@ -714,6 +776,7 @@ Collected in one place so nobody spends an afternoon on them:
 | Autonomy level `suggest` | Never distinguished from `approve` |
 | `limits.rpcFailureThreshold` | No consumer |
 | `limits.maxTransactionRetries` | No consumer; retries use RPC-client constants |
+| `execution.adapter: pumpportal_local` | Valid enum value, no adapter registered under that id; behaves as `auto` |
 | `execution.jitoTipSol` | No consumer; no bundle submission exists |
 | `execution.commitment` | No consumer; the RPC client is built with `confirmed` |
 | `notifications.emailEnabled` | Records deliveries as `skipped`; SMTP is not implemented |

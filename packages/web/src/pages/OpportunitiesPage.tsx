@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Badge,
@@ -169,8 +169,14 @@ export function OpportunitiesPage() {
     [trends],
   );
 
-  const clearsThreshold = (t: ScoredTrend): boolean =>
-    generationThreshold !== undefined && t.opportunityScore >= generationThreshold;
+  // Memoised so the two lists below depend on the predicate itself rather than
+  // on the threshold it happens to close over — the deps stay honest if the
+  // rule ever grows a second input.
+  const clearsThreshold = useCallback(
+    (t: ScoredTrend): boolean =>
+      generationThreshold !== undefined && t.opportunityScore >= generationThreshold,
+    [generationThreshold],
+  );
 
   const visible = useMemo(() => {
     const filtered = trends.filter((t) => {
@@ -204,9 +210,9 @@ export function OpportunitiesPage() {
       }
     });
     return sorted;
-  }, [trends, phase, category, minScore, tab, sort, generationThreshold]);
+  }, [trends, phase, category, minScore, tab, sort, clearsThreshold]);
 
-  const clearingCount = useMemo(() => trends.filter(clearsThreshold).length, [trends, generationThreshold]);
+  const clearingCount = useMemo(() => trends.filter(clearsThreshold).length, [trends, clearsThreshold]);
   const unconfirmed = useMemo(() => visible.filter((t) => t.sourceCount < MIN_SOURCES).length, [visible]);
   const unmeasured = useMemo(
     () => visible.filter((t) => !readEvidence(t.scoreBreakdown).rateEstimable).length,

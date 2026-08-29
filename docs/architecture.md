@@ -33,13 +33,13 @@ That is a deliberate fit to the workload, not a shortcut:
 The boundaries are still real — they are just compile-time rather than network
 boundaries. Services take their dependencies as constructor arguments, providers
 sit behind interfaces, and the pure decision logic lives in a package that
-cannot perform I/O at all.
+performs no I/O at all.
 
 ### The three packages
 
 | Package | Responsibility | Constraint |
 |---|---|---|
-| `@solcoin/shared` | Statistics, time-series, scoring, saturation, originality, the prediction model, Thompson sampling, the risk lexicon, prompt-injection detection, settings and enum schemas, pump.fun economics | No I/O of any kind. No database, no `fetch`, no filesystem. Every export is a pure function or a schema. Compiled with `tsc` to `dist/` and consumed as a normal workspace dependency. |
+| `@solcoin/shared` | Statistics, time-series, scoring, saturation, originality, the prediction model, Thompson sampling, the risk lexicon, prompt-injection detection, settings and enum schemas, pump.fun economics | No I/O of any kind: the package imports nothing from `node:`, calls no `fetch`, and its only dependency is `zod`. It also reads no ambient state — no `Date.now()`, no `Math.random()`; randomness comes from a seeded RNG (`math/random.ts`) and time is always a parameter. The rule is enforced: `eslint.config.js` restricts `node:*` imports, `fetch` and `process` in this package, and rejects `Date.now()`, `new Date()` and `Math.random()` outright. Compiled with `tsc` to `dist/` and consumed as a normal workspace dependency. |
 | `@solcoin/server` | Database and migrations, providers, services, jobs, security (auth, secrets, keystore, audit), the Fastify HTTP API | Bundled with esbuild into `dist/main.js`. Owns all state. |
 | `@solcoin/web` | React 19 dashboard, built by Vite, served as static files by the server | Talks only to the server's `/api` surface. No direct access to anything else. |
 
@@ -60,14 +60,15 @@ build.
 
  google_trends  ┐
  bluesky        │
- mastodon       │        trend-discovery                ResearchService
- wikipedia      ├──────▶ (research.discoveryInterval) ─▶ TrendService
- hackernews     │        side effects: yes              ├─▶ trends
- gdelt          │                                       └─▶ trend_observations
+ mastodon       │        trend-discovery                       ResearchService
+ wikipedia      ├──────▶ (research.discoveryIntervalMinutes) ─▶ TrendService
+ hackernews     │        side effects: yes                     ├─▶ trends
+ gdelt          │                                              └─▶ trend_observations
  stackexchange  │
  rss            │        identity resolution, then confirmation weighted by
  youtube*       │        SOURCE_INDEPENDENCE family — search, reference, news,
- reddit*        ┘        social, forum, video, on-chain   (* needs credentials)
+ reddit*        ┘        social, forum, video, onchain, manual
+                         (* needs credentials)
                                      │
  jupiter        ┐        market-scan │  MarketProvider.recentLaunches()
  dexscreener    ├──────▶ (900 s) ────┼─▶ market_snapshots, competitor_tokens
@@ -95,9 +96,11 @@ build.
                                      │
                               LaunchService.launch()
                                      │
-                    GuardService.checkLaunch()  ── phase, autonomy, daily
-                                     │             count, SOL caps, balance
-                                     │             floor, emergency stop
+                    GuardService.checkLaunch()  ── emergency stop, autonomy,
+                                     │             per-tx / hourly / daily SOL
+                                     │             caps, balance floor, hourly
+                                     │             and daily launch counts,
+                                     │             consecutive-failure breaker
                                      ▼
                     INSERT launches (idempotency_key)   ← claim before any
                                      │                    side effect
@@ -162,13 +165,18 @@ Two things fall out of this that matter more than the tidiness:
 **Time is injected.** Every service takes `now: () => number`, sourced from a
 `Clock` (`core/clock.ts`). `createFixedClock(startMs)` gives tests a timeline
 they control, including a `sleep` that advances the clock instead of waiting.
-Backtests and the simulation adapter use the same mechanism. Nothing in the
-service layer calls `Date.now()` directly.
+Backtests and the simulation adapter use the same mechanism. No service body
+calls `Date.now()`; the only `Date.now` in the service layer is the constructor
+default (`now: () => number = Date.now`), which the container always overrides
+with the clock.
 
-**The database is a parameter.** `ContainerOptions` accepts `db` and
-`skipMigrations`, so `tests/e2e/workflow.test.ts` builds a real container over a
-temporary database file and drives the whole workflow through the real HTTP
-surface. `tests/helpers.ts` deliberately uses a file-backed database rather than
+**The database is a parameter.** The container takes its handle as an argument
+rather than reaching for a module-level one, and `ContainerOptions` accepts `db`
+and `skipMigrations` for a caller that wants to supply its own — though no
+caller does today. `tests/e2e/workflow.test.ts` instead points `DATABASE_PATH`
+at a temporary file, builds the real container over it, and drives the whole
+workflow through the real HTTP surface with `app.inject`.
+`tests/helpers.ts` deliberately uses a file-backed database rather than
 `:memory:`, because the platform depends on WAL, `busy_timeout` and incremental
 vacuum, and testing a differently-configured engine tests the wrong thing.
 
@@ -302,25 +310,31 @@ The comment in `db/client.ts` says the repository layer avoids SQLite-specific
 SQL, so a move to Postgres would be a driver swap. **That is aspirational rather
 than true of the current code.** The actual counts:
 
-- 274 uses of `db.$raw.prepare(...)` across 37 files — raw SQL against the
-  synchronous `better-sqlite3` API.
-- 4 uses of the Drizzle query builder.
+- 252 uses of `db.$raw.prepare(...)` across 37 files — raw SQL against the
+  synchronous `better-sqlite3` API — plus 21 further `$raw.pragma` /
+  `$raw.transaction` / `$raw.backup` calls and the 8 pragmas in
+  `openDatabase()`.
+- 5 uses of the Drizzle query builder, all of them in `security/secrets.ts` and
+  `security/audit.ts`.
 
 Two concrete obstacles, in increasing order of pain:
 
 1. **Dialect.** `json_patch(...)` in `PipelineService.recordGateChecks` and
-   `unixepoch('subsec')` in the schema defaults are SQLite-only. `ON CONFLICT`
-   (15 uses) is fine — Postgres supports it.
+   `unixepoch('subsec')` in the schema defaults are SQLite-only, as are the
+   pragmas, `incremental_vacuum`, `wal_checkpoint`, the `pragma_page_count()`
+   table-valued function in `backupDatabase()` and the online backup API itself.
+   `ON CONFLICT` (15 uses) is fine — Postgres supports it.
 2. **Synchrony.** `better-sqlite3` is synchronous; every Postgres driver is
    async. Services call `.prepare().run()` and `.get()` inline, without
    `await`, all over the codebase. Converting them means making a large fraction
    of the service layer async and revisiting every call site.
 
-What *is* true and does carry over: the schema itself is portable (no SQLite-only
-column types, no `rowid` dependence, IDs and timestamps generated in application
-code rather than by the database), and the query shapes are ordinary SQL. A
-migration would be substantial mechanical work, not a rewrite of the design —
-but it would not be a driver swap.
+What *is* true and does carry over: the schema itself is largely portable (no
+SQLite-only column types, no `rowid` dependence, IDs generated in application
+code, timestamps stored as plain integers and written explicitly by almost every
+insert — the `unixepoch` column default is the one piece that needs rewriting),
+and the query shapes are ordinary SQL. A migration would be substantial
+mechanical work, not a rewrite of the design — but it would not be a driver swap.
 
 ---
 
@@ -421,7 +435,7 @@ but it would not be a driver swap.
 |---|---|
 | `job_runs` | Every run, with duration, status, item count and error. |
 | `job_state` | Per-job schedule, enablement, consecutive failures, and the lease (`locked_until`, `lock_token`). |
-| `idempotency_keys` | Generic guard for any side-effecting operation, with expiry. |
+| `idempotency_keys` | Intended as a generic guard for any side-effecting operation, with expiry. **Currently unused**: nothing writes to or reads it, and the only reference in the codebase is the `maintenance` job deleting expired rows. Launch idempotency lives on `launches.idempotency_key`; wallet transfers use `wallet_transactions.idempotency_key`. |
 | `provider_health` | Per-provider state, latency, failure counters, circuit-open-until and rate-limit-reset timestamps. |
 | `notifications`, `notification_deliveries` | Notification records with a dedupe key, and per-channel delivery attempts. |
 | `system_events` | Operational log, already redacted. Pruned after 30 days. |
@@ -444,11 +458,13 @@ but it would not be a driver swap.
   `organic_volume_sol`) are `real`, because they are estimates rather than
   balances.
 - **JSON text columns for structured data.** `score_breakdown`, `features`,
-  `drivers`, `economics`, `attempt_log`, `risk_flags`, `metrics`. Read through
-  the typed helpers in `db/json.ts`, which return a supplied default rather than
-  throwing on malformed content. The trade-off is accepted deliberately: these
-  fields are read as whole objects by the application and rendered in the UI,
-  never filtered or joined on.
+  `drivers`, `economics`, `attempt_log`, `risk_flags`, `metrics`, `sub_scores`.
+  Read through the typed helpers in `core/json.ts` — `parseJson` and
+  `parseJsonSchema` — which return a supplied default rather than throwing on
+  malformed content. (The comment at the top of `schema.ts` still points at
+  `db/json.ts`; the file has moved and the comment has not.) The trade-off is
+  accepted deliberately: these fields are read as whole objects by the
+  application and rendered in the UI, never filtered or joined on.
 - **Denormalised latest values.** `trends` and `tokens` both carry current
   metrics alongside their observation tables, so a list view is one query. The
   observation tables remain the source of truth.
@@ -473,8 +489,9 @@ answer returns `null` rather than guessing.
 
 ### `unconfigured` is an outcome, not an error
 
-`buildAllProviders()` constructs **every** provider unconditionally. The ones
-that need credentials the operator has not supplied are still built; they report
+`buildAllProviders()` constructs **every** provider it wires in, unconditionally
+and without checking credentials first. The ones that need credentials the
+operator has not supplied are still built; they report
 `state: 'unconfigured'` with `requiresCredentials: true` and a `setupHint`
 describing what unlocks them, and return nothing when asked for data.
 
@@ -485,8 +502,16 @@ broken; a provider that says "add a YouTube API key" is actionable.
 
 Construction is individually guarded. `attempt(name, factory)` catches, logs and
 returns `null`, so one bad constructor cannot stop the platform booting with the
-other nine. The same principle appears at the container level: a failure building
-the on-chain launch adapter degrades to simulation rather than aborting startup.
+rest — ten trend providers, three market providers, two AI providers and the
+image provider are each built behind their own `attempt`. The same principle
+appears at the container level: a failure building the on-chain launch adapter
+degrades to simulation rather than aborting startup.
+
+One caveat on "every provider": `buildAllProviders()` constructs every provider
+it imports, and `providers/market/pumpportal-stream.ts` is not one of them. That
+module is fully written — a singleton websocket client for pump.fun's launch and
+migration streams — but nothing imports it, so it is dead code today and no
+health entry appears for it.
 
 One shared detail worth noting: pump.fun's API is both a market provider and the
 SOL price source, so it is constructed first and a single 60-second-cached
@@ -504,15 +529,22 @@ responsibility earns its place:
 |---|---|---|
 | Token-bucket rate limit | none unless configured; `burst` defaults to `requests` | Stays inside published quotas. Reservations are chained through a promise queue so two concurrent callers cannot both see the same free token and overdraw. |
 | Full-jitter backoff | `min(30_000, 400 * 2^(attempt-1))`, actual wait uniform in `[0, base)` | Many jobs share a provider. Without jitter their retries synchronise into a storm; full jitter (uniform over the whole window, not base-plus-jitter) spreads them properly. |
-| Retries | `maxRetries` 3 | Only for errors marked retryable: HTTP 408, 429, 5xx, and transient network errors matched by message (`ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `socket hang up`, `fetch failed`). A 4xx is not retried. |
-| Retry-After | capped at 60 s | Ignoring it is how API keys get revoked. |
+| Retries | `maxRetries` 3 | Only for errors marked retryable: HTTP 408, 429, 5xx, and transient network errors matched by message (`ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `socket hang up`, `network`, `fetch failed`). Any other 4xx is not retried. |
+| Retry-After | capped at 60 s, on HTTP 429 only | Ignoring it is how API keys get revoked. |
 | Circuit breaker | opens after 6 consecutive failures, 120 s cooldown | A dead provider fails fast with `provider_unavailable` instead of consuming a job's whole time budget. `resetCircuit()` clears it manually. |
 | Timeout | 20 s | A hung socket is worse than an error: it holds a job slot until the scheduler's own timeout fires. |
 | Response cache | off unless `cacheTtlMs` set | For endpoints polled far more often than they change. GET only, keyed on the full resolved URL. |
-| `onResult` hook | — | Feeds `HealthService`, so provider health is measured from real traffic rather than only from synthetic probes. |
+| `onResult` hook | — | Fires on every completed request. Each provider uses it to keep its own last-success / last-failure / latency counters, which its `healthCheck()` then reports, so the health view carries evidence from real traffic and not only from the synthetic probe. |
 
-Two honest caveats:
+Three honest caveats:
 
+- **`HealthService.recordProviderResult()` is never called.** It exists, it is
+  documented as being fed by the `onResult` hook, and it upserts the
+  `provider_health` row that would give availability counters from live traffic
+  — but no provider wires `onResult` to it, so `provider_health` is written only
+  by the `health-check` probe path. The per-provider closures described above
+  are what actually carry live-traffic evidence today, and they are in-memory
+  and lost on restart.
 - **`Retry-After` is parsed from the response body, not the header.**
   `parseRetryAfter` regex-matches `retry-after` in `HttpError.bodyText`. Providers
   that return the standard `Retry-After` *header* and an unrelated body get no
@@ -549,8 +581,17 @@ executeFeeClaim(plan, payer, options)
 The `prepare`/`execute` split is the important shape. `prepare` produces a
 `LaunchPlan` carrying a human-readable `summary`, the mint address, the
 instruction list, an estimated cost and a labelled `costBreakdown` — all without
-touching the network beyond reads. That is what the approval UI displays, and it
-means a human approves the actual transaction rather than an intention.
+touching the network beyond reads, so what is about to be broadcast can be
+inspected before anything is.
+
+Two honest limits on that. First, the plan is built *inside*
+`LaunchService.launch()`, after the operator has already approved the candidate;
+approval in the dashboard is approval of a concept, not of a specific
+transaction, and there is no endpoint that returns a plan for review. Second,
+only `plan.mintAddress` and `plan.estimatedCostLamports` are persisted (onto the
+`launches` row) — `summary` and `costBreakdown` are computed on every launch and
+then discarded, so nothing in the UI displays them today. The split earns its
+keep as a testing and safety seam rather than as a review workflow.
 
 **The settings schema offers three adapter choices, but only two are
 implemented.** `execution.adapter` in `packages/shared/src/domain/settings.ts` is
@@ -664,13 +705,20 @@ method returns 10 000 rather than blocking the launch.
 ### Endpoint failover
 
 Endpoints are ordered by priority and benched for 60 s after 4 consecutive
-failures. `call()` — used for **reads only** — walks healthy endpoints first,
-then benched ones, and fails over on error. When everything is benched,
-`pickState()` returns whichever recovers soonest rather than failing outright.
+failures. `call()` walks healthy endpoints first, then benched ones, and fails
+over on error. When everything is benched, `pickState()` returns whichever
+recovers soonest rather than failing outright.
 
-Writes never use `call()`. `sendTransaction` pins one endpoint per attempt
-deliberately: transparently retrying a write across endpoints is exactly how
-duplicates happen.
+The docblock on `call()` says writes never use it and that `sendTransaction`
+pins one endpoint per attempt. **That is not what the code does**:
+`broadcastAndConfirm` issues both the initial `sendRawTransaction` and every
+rebroadcast through `call()`, so a broadcast that errors is retried against the
+next endpoint. What makes that survivable is the property the whole design rests
+on — the bytes are identical and already signed, so a second endpoint accepting
+them produces the same signature and the network deduplicates it. The danger
+`call()` would introduce is re-*signing* across endpoints, which never happens.
+The comment is stale rather than describing a defect, but it should be corrected
+in the source rather than believed.
 
 ### Duplicate-launch defence, three independent mechanisms
 
@@ -726,9 +774,11 @@ mid-flight leaves a record the recovery path can act on.
 `reconcile()` then refuses to guess. A row in `submitted` with a signature is
 **not** retried and **not** marked failed; it returns an outcome saying the
 result is unknown and is being reconciled on chain. The `launch-recovery` job
-(every 180 s, read-only) resolves it: the mint account existing is the definitive
-answer, a signature status carrying `err` means expired, and anything still
-ambiguous after 10 minutes is treated as expired. Rows in `failed` or
+(every 180 s; `hasSideEffects: false`, meaning it broadcasts nothing — it does
+write the resolved launch row) resolves it, and only once the row is at least two
+minutes old: the mint account existing is the definitive answer, a signature
+status carrying `err` means expired, and anything still ambiguous after 10
+minutes is treated as expired. Rows in `failed` or
 `abandoned` are deliberately not auto-retried either — the failure reason may
 still hold, and a caller who wants a retry must clear the record explicitly.
 
@@ -763,7 +813,7 @@ statement, `changes` is zero and this process quietly does nothing. The lease
 expires after `timeoutSeconds ?? max(120, intervalSeconds * 3)`, so a crashed
 run cannot deadlock the job forever. `releaseStaleLocks` clears expired leases
 and marks the corresponding `job_runs` row failed with "The process running this
-job stopped before it finished", so it does not sit as `running` and skew the
+job stopped before it finished.", so it does not sit as `running` and skew the
 health view.
 
 **Exponential backoff with jitter.**
@@ -785,9 +835,16 @@ count and either a truncated result JSON or the error. `progress(n, note)` lets 
 long job report partial counts. Runs longer than 30 s are logged at info.
 
 **Timeouts and abort.** Each run gets an `AbortController` aborted at the lease
-timeout. The signal is passed into `JobContext`, and jobs forward it to
-`HttpClient` and `SolanaRpc`. On shutdown, running jobs are aborted and given up
-to 5 s to unwind so their run rows finalise.
+timeout. The signal is passed into `JobContext`, but only two jobs actually take
+it and forward it down into `HttpClient` and `SolanaRpc`: `trend-discovery` and
+`candidate-pipeline`, which are the two long ones. The rest ignore it, so an
+overrunning `token-monitor` or `launch-queue` run simply keeps going past its
+lease expiry. It does not become a duplicate — `releaseStaleLocks` skips a job
+this process is still running — but the timeout is advisory for those jobs. For
+`launch-queue` that is arguably right — `launchApproved()` takes no signal, and
+aborting a broadcast in progress is worse than letting it land — but elsewhere it
+is a gap rather than a design statement. On shutdown, running
+jobs are aborted and given up to 5 s to unwind so their run rows finalise.
 
 ### Why the emergency stop suspends only side-effecting jobs
 
@@ -835,8 +892,9 @@ It exists to decouple services: a launch confirming should not need to know that
 notifications, analytics and monitoring all care. Handlers are isolated —
 `emit` dispatches through `Promise.resolve().then(...)` and logs rejections, so
 one failing subscriber cannot break the emitter or another subscriber.
-`emitAndWait` uses `Promise.allSettled` and exists for tests and the few places
-where ordering genuinely matters.
+`emitAndWait` uses `Promise.allSettled` and is there for tests and for any place
+that genuinely needs to wait on handlers — nothing calls it yet, in `src` or in
+`tests`.
 
 **It is deliberately not a message broker**, and the distinction is worth being
 explicit about because the two look similar in a diagram and are not similar at
@@ -853,8 +911,8 @@ Every durable state transition is a database write made by the service itself
 before the event is emitted. Events drive notifications, cache invalidation and
 dashboard freshness — things where a missed message means a missing notification,
 not a lost token or a double launch. Where durability is genuinely required, the
-mechanism is a table (`notification_deliveries` with retry, `idempotency_keys`,
-`job_runs`), not the bus.
+mechanism is a table (`launches.idempotency_key`, `notification_deliveries` with
+retry, `job_runs`), not the bus.
 
 If a future requirement did need at-least-once delivery across processes, that
 would be the point to introduce a broker. Introducing one now would add an
@@ -922,8 +980,10 @@ rather than a 404.
 The security posture, since this server can spend money:
 
 - Session cookies are HttpOnly, SameSite=Lax, and Secure in production.
-- Every non-GET request must additionally present the session's CSRF token in a
-  header. SameSite alone does not cover all browsers and proxy configurations.
+- Every state-changing request — anything other than `GET`, `HEAD` and
+  `OPTIONS` — must additionally present the session's CSRF token in the
+  `x-csrf-token` header. SameSite alone does not cover all browsers and proxy
+  configurations.
 - A strict CSP with `scriptSrc: 'self'` and no `unsafe-inline` for script. The
   dashboard is a compiled bundle and has no need for inline script, so refusing
   it costs nothing and is the single most effective XSS mitigation available.
@@ -934,13 +994,17 @@ The security posture, since this server can spend money:
   `GET:/api/auth/session`, `GET:/api/system/bootstrap`,
   `POST:/api/system/bootstrap`, `GET:/api/health` — rather than a prefix
   allow-list, which is easy to get wrong.
-- Global rate limit of 600 requests per minute per IP.
+- Global rate limit of 600 requests per minute per IP, with a much tighter
+  per-route limit on `POST:/api/system/bootstrap` (5 per 10 minutes), since that
+  is the one public route that creates an account.
 - CORS headers are emitted only when `CORS_ORIGINS` is set. The default
   deployment serves the dashboard from the same origin and needs none.
 - Errors always return `{ error: { code, message, details? } }` with a stable
-  code from the `ErrorCode` union. A 5xx never surfaces the underlying message,
-  because it may contain credentials, file paths or internal structure; `AppError`
-  messages are written to be shown, and everything else is replaced.
+  code from the `ErrorCode` union. `AppError` messages are written to be shown,
+  so they are returned verbatim at any status; an *unexpected* error is not —
+  at 5xx it is replaced with a fixed sentence pointing at the server log, and
+  below 5xx its message is passed through `redactSecrets` first. Nothing ever
+  returns a stack trace.
 
 `AppError` (`core/errors.ts`) carries a machine-readable code that maps to both
 an HTTP status and a default retryability. The mapping is worth knowing:
@@ -950,9 +1014,11 @@ Retryable by default: `rate_limited`, `provider_unavailable`, `provider_error`,
 `rpc_error`, `transaction_expired`.
 
 Redaction happens at three layers, because a credential reaching a log
-aggregator is not recoverable: pino path-based redaction for known field names, a
-regex sweep over rendered log strings, and `safeErrorText()` applied to every
-error before it is stored or returned.
+aggregator is not recoverable: pino path-based redaction for a fixed list of
+field names (`core/logger.ts`), a regex sweep (`redactSecrets`) over rendered log
+strings, and `safeErrorText()` — the same sweep plus truncation — applied to
+error text before it is logged or written to a `job_runs`, `launches` or
+`system_events` row.
 
 ---
 
@@ -1011,7 +1077,9 @@ the shared price closure in `providers/index.ts` duck-type for that method.
 5. Add the id to the `execution.adapter` enum in
    `packages/shared/src/domain/settings.ts`, so the id can actually be selected.
 
-Note that two call sites in `container.ts` — `feeCollectionPreview` and
-`collectFeesNow` — currently hardcode the lookup as
+Note that four call sites currently hardcode the lookup as
 `network === 'simulation' ? 'simulation' : 'pumpfun_sdk'` rather than going
-through `LaunchService.adapterFor`. A third adapter would need those updated too.
+through `LaunchService.adapterFor`: `feeCollectionPreview` and `collectFeesNow`
+in `container.ts`, and the `fee-detect` and `fee-collect` jobs in
+`jobs/definitions.ts`. A third adapter would need all four updated too — the
+abstraction is clean on the launch path and leaky on the fee path.

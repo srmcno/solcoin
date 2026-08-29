@@ -479,7 +479,10 @@ function EvaluationCard({ evaluation }: { evaluation: Evaluation }) {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-ink">{humanise(role)}</div>
-          <div className="text-xs text-ink-subtle">{evaluation.model ?? 'model not recorded'}</div>
+          <div className="text-xs text-ink-subtle">
+            {evaluation.model ?? 'model not recorded'}
+            {evaluation.provider ? ` · ${humanise(evaluation.provider)}` : ''}
+          </div>
         </div>
         <div className="text-right">
           <div className="tnum text-lg font-semibold text-ink">{formatPercent(score, 0)}</div>
@@ -603,6 +606,7 @@ export function CandidateDetailPage() {
   const originality = query.data?.originality ?? {};
   const trend = query.data?.trend ?? null;
   const network = system.data?.network;
+  const launchAutonomy = system.data?.autonomy?.launch;
 
   const features = useMemo(() => {
     const raw = prediction?.features;
@@ -639,7 +643,12 @@ export function CandidateDetailPage() {
 
   const economics = (prediction?.economics ?? null) as Record<string, unknown> | null;
   const launchCostSol = num(economics, 'launchCostSol');
-  const solPriceUsd = num(economics, 'solPriceUsd');
+  // The economic assumptions default `solPriceUsd` to 0 when no price feed was
+  // available. Multiplying by it would print a confident "≈ $0.00" next to a
+  // real SOL cost, so zero is treated as "not known" and the USD line is
+  // dropped entirely rather than invented.
+  const rawSolPriceUsd = num(economics, 'solPriceUsd');
+  const solPriceUsd = rawSolPriceUsd !== null && rawSolPriceUsd > 0 ? rawSolPriceUsd : null;
   const confidence = num(prediction, 'confidence') ?? candidate?.confidence ?? null;
   const modelVersion = str(prediction, 'model_version');
   const tailConcentration = num(prediction, 'tail_concentration');
@@ -688,6 +697,34 @@ export function CandidateDetailPage() {
   const hoursToExpiry = candidate.expiresAt ? (candidate.expiresAt - Date.now()) / 3_600_000 : null;
   const canLaunchNow = can('launch_token') && LAUNCHABLE.has(candidate.status);
   const metadataMissing = !candidate.metadataUri;
+  // A launch on the "simulation" network mints nothing: the address is
+  // synthetic. Nothing about it may be linked to a block explorer or described
+  // as a token, or the operator will read simulator output as real revenue.
+  const launchedNetwork = launch.data?.network ?? network;
+  const launchWasSimulated = launch.data?.simulated ?? launchedNetwork === 'simulation';
+  const launchCostRecorded = typeof launch.data?.costSol === 'number' && launch.data.costSol > 0;
+
+  // Saturation and originality both zero-fill on the server, so "0" arrives
+  // whether the check ran and found nothing or never ran at all. Anything not
+  // positively recorded is shown as blank rather than as a reassuring zero.
+  const saturationDetailRecorded = typeof saturation.score === 'number';
+  const saturationScore =
+    saturation.score ?? (candidate.saturationScore > 0 ? candidate.saturationScore : null);
+  const competitorCount = typeof saturation.competitorCount === 'number' ? saturation.competitorCount : null;
+  const recentCompetitorCount =
+    typeof saturation.recentCompetitorCount === 'number' ? saturation.recentCompetitorCount : null;
+  const bestCompetitorMarketCapUsd =
+    typeof saturation.bestCompetitorMarketCapUsd === 'number' && saturation.bestCompetitorMarketCapUsd > 0
+      ? saturation.bestCompetitorMarketCapUsd
+      : null;
+  const hardCollision = saturation.hardCollision ?? candidate.hardCollision;
+  const matches = saturation.matches ?? [];
+
+  const originalityDetailRecorded = typeof originality.score === 'number';
+  const originalityScore =
+    originality.score ?? (candidate.originalityScore > 0 ? candidate.originalityScore : null);
+  const nearestSimilarity =
+    originality.nearestPrior?.similarity ?? (typeof originality.maxPriorSimilarity === 'number' ? originality.maxPriorSimilarity : null);
 
   return (
     <div className="space-y-5">
@@ -770,8 +807,23 @@ export function CandidateDetailPage() {
                   >
                     {trend.title}
                   </Link>
-                  {trend.opportunityScore !== undefined && ` (score ${formatScore(trend.opportunityScore, 1)})`}
-                  {trend.phase ? `, ${humanise(trend.phase)} phase` : ''}.
+                  {trend.opportunityScore !== undefined && (
+                    <>
+                      {' '}
+                      — opportunity score {formatScore(trend.opportunityScore, 1)}
+                      {/* A score built from one source is far weaker evidence
+                          than the same score built from six, so the count it
+                          rests on travels with it. */}
+                      {typeof trend.sourceCount === 'number'
+                        ? ` from ${formatNumber(trend.sourceCount)} source${trend.sourceCount === 1 ? '' : 's'}`
+                        : ' (source count not recorded)'}
+                    </>
+                  )}
+                  {trend.phase ? `, ${humanise(trend.phase)} phase` : ''}
+                  {typeof trend.remainingLifespanHours === 'number' && trend.remainingLifespanHours > 0
+                    ? `, an estimated ${formatDuration(trend.remainingLifespanHours)} of attention left`
+                    : ''}
+                  .
                 </>
               ) : (
                 'No source trend is recorded for this candidate.'
@@ -786,6 +838,20 @@ export function CandidateDetailPage() {
             )}
           </div>
         </div>
+
+        {/* Approving is not a neutral act under automatic autonomy: it hands the
+            candidate straight to the launcher. The operator is told that before
+            they press the button, not after it. */}
+        {can('approve_candidate') && APPROVABLE.has(candidate.status) && launchAutonomy === 'auto' && (
+          <div className="mt-4">
+            <Note tone={network === 'mainnet' || !network ? 'negative' : 'warning'}>
+              <span aria-hidden="true">⚠</span> <strong>Launch autonomy is automatic.</strong> Approving this candidate
+              makes it eligible for the next launch cycle with no further prompt on{' '}
+              <strong>{network ? humanise(network) : 'a network this page could not read'}</strong>
+              {network === 'mainnet' ? ', spending real funds.' : '.'}
+            </Note>
+          </div>
+        )}
 
         <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4">
           {can('approve_candidate') && APPROVABLE.has(candidate.status) && (
@@ -829,29 +895,38 @@ export function CandidateDetailPage() {
           )}
         </div>
 
-        {approve.isError && <Note tone="negative">Could not approve: {approve.error.message}</Note>}
+        {approve.isError &&<Note tone="negative">Could not approve: {approve.error.message}</Note>}
         {approve.isSuccess && <Note tone="positive">{approve.data?.message ?? 'Approved.'}</Note>}
         {launch.isError && <Note tone="negative">Launch failed: {launch.error.message}</Note>}
-        {launch.isSuccess && (
-          <Note tone="positive">
-            Launched{launch.data?.simulated ? ' in simulation' : ''} on {humanise(launch.data?.network ?? network)}.
-            Mint {truncateAddress(launch.data?.mint, 6)}
-            {launch.data?.mint && network && (
-              <>
-                {' '}
-                <a
-                  className="underline"
-                  href={solscanUrl('token', launch.data.mint, network)}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  view on Solscan
-                </a>
-              </>
-            )}
-            {launch.data?.costSol !== undefined && ` — cost ${formatSol(launch.data.costSol)}.`}
-          </Note>
-        )}
+        {launch.isSuccess &&
+          (launchWasSimulated ? (
+            <Note tone="warning">
+              <span aria-hidden="true">◇</span> <strong>Simulated — no on-chain token exists.</strong> The mint{' '}
+              {truncateAddress(launch.data?.mint, 6)} is synthetic: there is no Solscan or pump.fun page for it, no
+              transaction was broadcast and nothing was spent. It is recorded so the pipeline and the learning loop can
+              be exercised end to end. Switch the network in Settings to launch for real.
+            </Note>
+          ) : (
+            <Note tone="positive">
+              Launched on {humanise(launchedNetwork)}. Mint {truncateAddress(launch.data?.mint, 6)}
+              {launch.data?.mint && launchedNetwork && (
+                <>
+                  {' '}
+                  <a
+                    className="underline"
+                    href={solscanUrl('token', launch.data.mint, launchedNetwork)}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    view on Solscan ↗
+                  </a>
+                </>
+              )}
+              {launchCostRecorded
+                ? ` — cost ${formatSol(launch.data?.costSol)}.`
+                : ' The transaction cost was not recorded, so none is shown.'}
+            </Note>
+          ))}
         {regenerate.isError && <Note tone="negative">Could not regenerate: {regenerate.error.message}</Note>}
         {regenerate.isSuccess && (
           <Note tone="positive">
@@ -904,7 +979,13 @@ export function CandidateDetailPage() {
               <StatTile
                 label="Expected value"
                 value={formatSol(num(prediction, 'expected_value_sol'), { sign: true })}
-                tone={(num(prediction, 'expected_value_sol') ?? 0) >= 0 ? 'positive' : 'negative'}
+                tone={
+                  num(prediction, 'expected_value_sol') === null
+                    ? 'neutral'
+                    : (num(prediction, 'expected_value_sol') ?? 0) >= 0
+                      ? 'positive'
+                      : 'negative'
+                }
                 hint="Mean net SOL across simulated outcomes, after launch and operating costs."
               />
               <StatTile
@@ -926,7 +1007,7 @@ export function CandidateDetailPage() {
             </div>
 
             <div className="grid gap-4 lg:grid-cols-2">
-              <div>
+              <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-ink">Milestone probabilities</h3>
                 {milestones.length === 0 ? (
                   <Note tone="warning">No milestone probabilities were stored with this prediction.</Note>
@@ -983,7 +1064,7 @@ export function CandidateDetailPage() {
                 )}
               </div>
 
-              <div>
+              <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-ink">Creator fees, as a range</h3>
                 <p className="mt-1 text-xs leading-relaxed text-ink-subtle">
                   Token outcomes are heavily skewed: most earn almost nothing and a few earn a great deal. A single
@@ -1117,7 +1198,8 @@ export function CandidateDetailPage() {
                   <span className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Score spread</span>
                   <span className="tnum text-xs text-ink-muted">
                     {formatPercent(Math.min(...scores), 0)} – {formatPercent(Math.max(...scores), 0)} (spread{' '}
-                    {formatPercent(spread, 0)})
+                    {formatPercent(spread, 0)}) across {formatNumber(scores.length)} reviewer
+                    {scores.length === 1 ? '' : 's'}
                     {candidate.aiPanelDisagreement > 0 &&
                       `, recorded disagreement ${formatPercent(candidate.aiPanelDisagreement, 0)}`}
                   </span>
@@ -1163,46 +1245,72 @@ export function CandidateDetailPage() {
           description="How crowded this idea already is on-chain. Timing is the edge this platform claims, so a high score here is the single strongest reason not to launch."
         />
 
+        {!saturationDetailRecorded && (
+          <Note tone="warning">
+            No saturation scan detail is stored for this candidate, so the competitor breakdown below is blank rather
+            than zero — a count of zero would claim the market was searched and found empty, which is not what
+            happened. This normally means the candidate was created outside the generation pipeline.
+          </Note>
+        )}
+
         <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatTile
             label="Saturation score"
-            value={formatPercent(saturation.score ?? candidate.saturationScore, 0)}
+            value={formatPercent(saturationScore, 0)}
             tone={
-              (saturation.score ?? candidate.saturationScore) > 0.66
-                ? 'negative'
-                : (saturation.score ?? candidate.saturationScore) > 0.33
-                  ? 'warning'
-                  : 'positive'
+              saturationScore === null
+                ? 'neutral'
+                : saturationScore > 0.66
+                  ? 'negative'
+                  : saturationScore > 0.33
+                    ? 'warning'
+                    : 'positive'
             }
             hint="Higher is worse. Derived from similar tokens weighted by recency and traction."
           />
           <StatTile
             label="Competitors"
-            value={formatNumber(saturation.competitorCount ?? 0)}
-            hint={`${formatNumber(saturation.recentCompetitorCount ?? 0)} launched in the last 24 hours`}
+            value={formatNumber(competitorCount)}
+            hint={
+              competitorCount === null
+                ? 'No scan result recorded.'
+                : `${formatNumber(recentCompetitorCount ?? 0)} of them launched in the last 24 hours. Counted above a 42% similarity floor.`
+            }
           />
           <StatTile
             label="Best competitor"
-            value={formatUsd(saturation.bestCompetitorMarketCapUsd ?? null, { compact: true })}
-            hint="Largest market cap among matching tokens."
+            value={formatUsd(bestCompetitorMarketCapUsd, { compact: true })}
+            hint={
+              bestCompetitorMarketCapUsd === null
+                ? 'No matching token reported a market cap, so there is no figure to show — not the same as a market cap of zero.'
+                : `Largest market cap among matching tokens. Best competitor traction ${formatPercent(saturation.competitorQuality ?? null, 0)}.`
+            }
           />
           <StatTile
             label="Name collision"
-            value={saturation.hardCollision ?? candidate.hardCollision ? 'Yes' : 'No'}
-            tone={saturation.hardCollision ?? candidate.hardCollision ? 'negative' : 'positive'}
+            value={hardCollision ? 'Yes' : 'No'}
+            tone={hardCollision ? 'negative' : 'positive'}
             hint="Whether an existing token is close enough that traders would confuse the two."
           />
         </div>
 
-        {(saturation.competitorCount ?? 0) === 0 && (saturation.matches ?? []).length === 0 && (
+        {saturationDetailRecorded && competitorCount === 0 && matches.length === 0 && (
           <Note tone="warning">
             No competing tokens were returned by the market scan. A saturation score of zero here means
             &quot;nothing found&quot;, which is not the same as &quot;nothing exists&quot; — if the market data
-            providers are degraded, this check is uninformative. Check System health before relying on it.
+            providers are degraded or unconfigured, this check is uninformative rather than reassuring. Check System
+            health before relying on it.
           </Note>
         )}
 
-        {(saturation.matches ?? []).length > 0 && (
+        {matches.length > 0 && competitorCount !== null && competitorCount > matches.length && (
+          <Note>
+            Showing the {formatNumber(matches.length)} closest of {formatNumber(competitorCount)} matching tokens. The
+            saturation score above is computed from all {formatNumber(competitorCount)}, not only the ones listed.
+          </Note>
+        )}
+
+        {matches.length > 0 && (
           <div className="mt-4">
             <DataTable>
               <thead>
@@ -1217,7 +1325,7 @@ export function CandidateDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {(saturation.matches ?? []).map((match, index) => (
+                {matches.map((match, index) => (
                   <tr key={match.mint ?? `${match.symbol ?? 'match'}-${index}`}>
                     <Td className="text-ink">
                       <div className="font-medium">{match.name ?? 'Unnamed'}</div>
@@ -1230,7 +1338,9 @@ export function CandidateDetailPage() {
                     </Td>
                     <Td align="right" className="tnum">
                       <div>{formatPercent(match.similarity ?? null, 0)}</div>
-                      <ScoreBar className="mt-1 w-20" value={match.similarity ?? 0} invert />
+                      {typeof match.similarity === 'number' && (
+                        <ScoreBar className="mt-1 w-20" value={match.similarity} invert />
+                      )}
                     </Td>
                     <Td align="right" className="tnum">
                       {formatDuration(match.ageHours ?? null)}
@@ -1248,18 +1358,20 @@ export function CandidateDetailPage() {
                     <Td>
                       {match.mint ? (
                         <span className="flex items-center gap-2">
-                          {network ? (
-                            <a
-                              className="tnum text-xs text-accent-soft transition-colors hover:underline"
-                              href={solscanUrl('token', match.mint, network)}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              {truncateAddress(match.mint)}
-                            </a>
-                          ) : (
-                            <span className="tnum text-xs text-ink-muted">{truncateAddress(match.mint)}</span>
-                          )}
+                          <a
+                            className="tnum text-xs text-accent-soft transition-colors hover:underline"
+                            // Competitors come from the mainnet market-data
+                            // providers whichever network this instance executes
+                            // on, so the explorer link is always mainnet. Using
+                            // the local network here would produce a devnet link
+                            // to a mainnet token.
+                            href={solscanUrl('token', match.mint, 'mainnet')}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            title={match.mint}
+                          >
+                            {truncateAddress(match.mint)} ↗
+                          </a>
                           <CopyButton value={match.mint} label="Copy" />
                         </span>
                       ) : (
@@ -1294,17 +1406,21 @@ export function CandidateDetailPage() {
           description="Distance from every concept this platform has generated before, and from the naming patterns that saturate every token list."
         />
 
+        {!originalityDetailRecorded && (
+          <Note tone="warning">
+            No originality check detail is stored for this candidate, so the nearest prior concept and the cliché list
+            below are unavailable rather than empty. An empty list here would claim the corpus was searched and
+            nothing was found.
+          </Note>
+        )}
+
         <div className="mt-4 grid gap-4 lg:grid-cols-3">
-          <div>
+          <div className="min-w-0">
             <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Originality score</div>
-            <div className="tnum mt-1 text-2xl font-semibold text-ink">
-              {formatPercent(originality.score ?? candidate.originalityScore, 0)}
-            </div>
-            <ScoreBar
-              className="mt-2"
-              value={originality.score ?? candidate.originalityScore}
-              tone={(originality.score ?? candidate.originalityScore) > 0.6 ? 'positive' : 'warning'}
-            />
+            <div className="tnum mt-1 text-2xl font-semibold text-ink">{formatPercent(originalityScore, 0)}</div>
+            {originalityScore !== null && (
+              <ScoreBar className="mt-2" value={originalityScore} tone={originalityScore > 0.6 ? 'positive' : 'warning'} />
+            )}
             {originality.isDuplicate && (
               <Note tone="negative">
                 This is effectively a repeat of a concept the platform has already produced. Launching it competes with
@@ -1313,28 +1429,33 @@ export function CandidateDetailPage() {
             )}
           </div>
 
-          <div>
+          <div className="min-w-0">
             <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Nearest prior concept</div>
             {originality.nearestPrior?.name ? (
               <div className="mt-1 text-sm text-ink">
                 {originality.nearestPrior.name}{' '}
                 <span className="tnum text-accent-soft">${originality.nearestPrior.symbol ?? '—'}</span>
-                <div className="tnum mt-1 text-xs text-ink-subtle">
-                  {formatPercent(originality.nearestPrior.similarity ?? originality.maxPriorSimilarity ?? null, 0)}{' '}
-                  similar
-                </div>
+                <div className="tnum mt-1 text-xs text-ink-subtle">{formatPercent(nearestSimilarity, 0)} similar</div>
               </div>
+            ) : !originalityDetailRecorded ? (
+              <p className="mt-1 text-sm text-ink-muted">Not recorded for this candidate.</p>
             ) : (
               <p className="mt-1 text-sm text-ink-muted">
-                No prior concept was close enough to register. Either this is genuinely new ground or the platform has
-                not generated much yet.
+                No prior concept was close enough to register
+                {nearestSimilarity !== null && nearestSimilarity > 0
+                  ? ` — the closest sat at ${formatPercent(nearestSimilarity, 0)} similarity`
+                  : ''}
+                . Either this is genuinely new ground or the platform has not generated much yet, and the corpus this
+                was compared against is only the concepts this instance has produced.
               </p>
             )}
           </div>
 
-          <div>
+          <div className="min-w-0">
             <div className="text-xs font-medium uppercase tracking-wide text-ink-subtle">Clichés detected</div>
-            {(originality.cliches ?? []).length === 0 ? (
+            {!originalityDetailRecorded ? (
+              <p className="mt-1 text-sm text-ink-muted">Not recorded for this candidate.</p>
+            ) : (originality.cliches ?? []).length === 0 ? (
               <p className="mt-1 text-sm text-ink-muted">None of the tracked naming clichés were found.</p>
             ) : (
               <>
@@ -1575,7 +1696,7 @@ export function CandidateDetailPage() {
               disabled={launch.isPending || metadataMissing}
               onClick={() => launch.mutate(undefined)}
             >
-              {launch.isPending ? 'Launching…' : `Launch on ${humanise(network ?? 'unknown')}`}
+              {launch.isPending ? 'Launching…' : network ? `Launch on ${humanise(network)}` : 'Launch'}
             </button>
           </>
         }
@@ -1614,10 +1735,22 @@ export function CandidateDetailPage() {
               <span aria-hidden="true">⚠</span> <strong>This is mainnet.</strong> The transaction spends real funds and
               cannot be undone, refunded or reversed. A token, once minted, is public and permanent.
             </Note>
-          ) : (
+          ) : network === 'devnet' ? (
             <Note tone="info">
-              Network is {humanise(network ?? 'unreported')}, so no real funds are at stake — but the launch is still
-              recorded and counts against your daily limits.
+              Network is devnet: a real transaction on a test chain, paid for with test SOL. Nothing of value is spent,
+              but the launch is recorded and counts against your daily limits.
+            </Note>
+          ) : network === 'simulation' ? (
+            <Note tone="info">
+              Network is simulation: no transaction is broadcast and no token is created anywhere. The result is a
+              synthetic mint address used to exercise the pipeline, and it will be labelled as simulated everywhere it
+              appears.
+            </Note>
+          ) : (
+            <Note tone="warning">
+              <span aria-hidden="true">⚠</span> The API did not report which network this instance executes on, so this
+              page cannot tell you whether the transaction spends real funds. Do not assume it is safe — check the
+              network on the Settings page before launching.
             </Note>
           )}
 
@@ -1647,6 +1780,13 @@ export function CandidateDetailPage() {
             <Note tone="negative">
               <span aria-hidden="true">■</span> The emergency stop is engaged. Every action that spends funds is
               suspended, so this launch will be refused until it is released.
+            </Note>
+          )}
+
+          {system.isError && (
+            <Note tone="warning">
+              System status could not be read ({system.error.message}), so the network, the emergency-stop state and
+              the spend limits above are unknown rather than confirmed safe.
             </Note>
           )}
 

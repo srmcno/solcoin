@@ -107,9 +107,19 @@ The inner envelope is applied by `WalletKeystore.persist`; the outer one by
 `SecretStore.set`, which does not know or care that the plaintext it was handed
 is itself a ciphertext. The reason is containment: a bug that leaks a secret
 row — a debug endpoint, a `SELECT *` in a log line, an over-eager export — still
-does not leak the wallet. Rotating the master key re-wraps both layers, because
-rotation re-encrypts the outer envelope and the inner passphrase is derived from
-the same master key.
+does not leak the wallet.
+
+**A sharp edge, stated plainly: `rotateMasterKey` re-wraps only the outer
+envelope.** It decrypts each `secrets` row under the old master key and
+re-encrypts the same plaintext under the new one. For the keystore row that
+plaintext is the JSON `KeystoreRecord`, whose `encrypted` blob is still sealed
+under `"wallet:" + oldMasterKey`. `WalletKeystore.masterPassphrase()` derives
+`"wallet:" + process.env.SOLCOIN_MASTER_KEY` at use time, so once the operator
+switches to the new key the inner envelope no longer opens and `withSigner`
+fails. (The docstring on `masterPassphrase` claims rotation re-wraps both
+layers; the code in `SecretStore.rotateMasterKey` does not do that.) Export the
+wallet secret key, rotate, then re-import it — or treat rotation as unsupported
+for the keystore until the inner layer is rotated too.
 
 Note the asymmetry: each layer uses its own random salt and its own random IV,
 so the two derived keys are unrelated even though both come from the same master
@@ -137,9 +147,11 @@ keypair. Nothing stops a future call site from closing over it.
 ### Why the key never crosses HTTP
 
 There is no API route that returns the secret key as part of normal operation.
-`getPublicKey()` and `getRecord()` are what the routes use; the record's
-`encrypted` blob is never rendered to a client. Signing happens server-side,
-inside the process, and the route sees only a transaction signature.
+`getPublicKey()` is what the routes use, and `getRecord()` is read only inside
+`wallet.service.ts`, which takes the public key and the custody mode off it; the
+record's `encrypted` blob is never rendered to a client. Signing happens
+server-side, inside the process, and the route sees only a transaction
+signature.
 
 The single exception is the deliberate export path.
 
@@ -234,10 +246,12 @@ worse than losing a credential: half the store readable under the old key and
 half under the new, with no single key that opens both, and no way to tell which
 is which without trying. Every row moves or none does.
 
-**Not yet wired to an interface.** `rotateMasterKey` has no HTTP route and no
-CLI command. It is reachable from code and from tests only. Rotating today means
-writing a short script against `SecretStore`, or re-entering credentials under a
-new key.
+**Not yet wired to an interface, and not covered by a test.** `rotateMasterKey`
+has no HTTP route and no CLI command — `src/cli/` contains only `doctor.ts` and
+`migrate.ts` — and `grep` finds no call site anywhere in `packages/` or
+`tests/`. Rotating today means writing a short script against `SecretStore`, or
+re-entering credentials under a new key. Given the keystore caveat above, the
+second option is the safer one.
 
 ---
 
@@ -413,11 +427,13 @@ otherwise fine-grained mechanism; if you want a lower-privileged settings role,
 that is where to add it.
 
 Separately, `SENSITIVE_SETTING_PATHS` in
-`packages/shared/src/domain/settings.ts` marks 21 paths (autonomy toggles,
-network, phase, dev-buy size, every spend and launch limit, the treasury
-address, the quality gate thresholds, the emergency stop) whose changes are
-reported back in the response as `sensitiveChanges` and recorded with before and
-after values in `setting_history` and the audit log.
+`packages/shared/src/domain/settings.ts` marks 19 paths (the launch,
+fee-collection and wallet-transfer autonomy toggles, network, phase, dev-buy
+size, the five SOL spend and launch limits plus the balance floor, the treasury
+address and the auto-sweep flag, four quality-gate thresholds, and the emergency
+stop — note that `limits.maxAiSpendUsdPerDay` is *not* on the list) whose
+changes are reported back in the response as `sensitiveChanges` and recorded
+with before and after values in `setting_history` and the audit log.
 
 ---
 
@@ -605,7 +621,7 @@ Everything below follows from refusing to let that text change the task.
 
 ### Layer 2 — scored detection
 
-`detectInjection(text)` runs 23 weighted patterns. Weight 1.0 goes to the
+`detectInjection(text)` runs 22 weighted patterns. Weight 1.0 goes to the
 unambiguous ones: instruction override, funds exfiltration, key exfiltration,
 address substitution, concealment, safety override. Examples of what fires:
 
@@ -744,7 +760,7 @@ approval, `note` records without gating.
 
 | Flag | What it catches |
 |---|---|
-| `copyrighted_character` / `company_impersonation` | ~60 well-known marks and properties — Disney, Pokémon, Star Wars, Minecraft, Nike, Coca-Cola, OpenAI, Binance, the Olympics, and so on. The flag is `company_impersonation` for corporate names and `copyrighted_character` for the rest |
+| `copyrighted_character` / `company_impersonation` | 72 well-known marks and properties — Disney, Pokémon, Star Wars, Minecraft, Nike, Coca-Cola, OpenAI, Binance, the Olympics, and so on. The flag is `company_impersonation` for corporate names and `copyrighted_character` for the rest |
 | `misleading_financial_claim` | 12 patterns: "guaranteed", "risk-free", "can't lose", "passive income", "will moon", "next bitcoin", "investment opportunity", "financial advice" |
 | `hate_or_harassment` | Slurs and hate symbols |
 | `sexual_content` | Explicit sexual terms |
@@ -757,10 +773,10 @@ approval, `note` records without gating.
 
 | Flag | What it catches |
 |---|---|
-| `company_impersonation` | Eight patterns implying an official relationship: "official", "verified", "endorsed by", "backed by", "in collaboration with", "the real" |
+| `company_impersonation` | Eight patterns implying an official relationship: "official", "verified", "partnership with", "endorsed by", "backed by", "in collaboration with", "the real", and "team …token/coin" |
 | `medical_or_legal_claim` | "cures cancer", "FDA-approved", "clinically proven" |
 | `election_related` | "vote for", "election fraud", "presidential campaign" |
-| `real_person` | A title followed by a capitalised name (`Dr Smith`, `Senator Jones`) — a weak proper-noun heuristic the AI reviewer then adjudicates |
+| `real_person` | A lower-case title followed by a capitalised name (`president Smith`, `senator Jones`) — a weak proper-noun heuristic the AI reviewer then adjudicates. Note the rule is the one case-sensitive rule in the set and its title alternation is written in lower case, so a conventionally capitalised `Dr Smith` or `Senator Jones` does **not** match |
 
 `PROTECTED_MARKS` is explicitly not exhaustive. It is a high-signal starting set;
 the AI risk reviewer and the human approval gate cover the long tail.
@@ -801,18 +817,21 @@ has generated before — and the injection review flag described above.
 
 ## Redaction
 
-Two independent mechanisms, both fed by the same pattern list in
-`packages/server/src/core/errors.ts`.
+Two independent mechanisms: pino's path-based redaction, driven by
+`REDACT_PATHS` in `packages/server/src/core/logger.ts`, and a regex sweep driven
+by `SECRET_PATTERNS` in `packages/server/src/core/errors.ts`.
 
 ### Path-based redaction (pino)
 
 `createLogger` passes `redact: { paths: REDACT_PATHS, censor: '[redacted]' }`.
-The list covers 24 field names — `password`, `passphrase`, `privateKey`,
-`secretKey`, `apiKey`, `token`, `accessToken`, `sessionToken`, `authorization`,
-`cookie`, `mintSecret`, `mintSecretEncrypted`, `keypair`, `seed`, `mnemonic`,
-`totpSecret` and their snake_case variants — plus one-level wildcards
-(`*.password`, `*.apiKey`, `*.token`, …) and explicit header paths
-(`req.headers.authorization`, `req.headers.cookie`).
+The list is 32 paths: 22 bare field names — `password`, `passphrase`,
+`privateKey`, `secretKey`, `secret`, `apiKey`, `token`, `accessToken`,
+`refreshToken`, `sessionToken`, `authorization`, `cookie`, `mintSecret`,
+`mintSecretEncrypted`, `keypair`, `seed`, `mnemonic`, `totpSecret` and
+snake_case variants of several of them — plus six one-level wildcards
+(`*.password`, `*.privateKey`, `*.secretKey`, `*.apiKey`, `*.token`, `*.secret`)
+and four explicit header paths (`req.headers.authorization`,
+`req.headers.cookie`, `headers.authorization`, `headers.cookie`).
 
 This catches the structured case: a credential passed as a named field.
 
@@ -828,7 +847,7 @@ interpolated into a message string is invisible to it. So a `logMethod` hook run
 | `\bsk-ant-[A-Za-z0-9_-]{16,}` | Anthropic keys |
 | `\bBearer\s+[A-Za-z0-9._-]{16,}` | Authorisation headers |
 | `[A-Za-z0-9_-]{40,}\.[…]{20,}\.[…]{20,}` | JWTs |
-| `"?(api_key\|apikey\|secret\|password\|passphrase\|private_key\|token)"?\s*[:=]\s*"?[^\s",}]{8,}` | `key: value` shapes in any serialised form |
+| `"?(api[_-]?key\|apikey\|secret\|password\|passphrase\|private[_-]?key\|token)"?\s*[:=]\s*"?[^\s",}]{8,}` | `key: value` shapes in any serialised form |
 | `\b[0-9a-fA-F]{64}\b` | Hex-encoded 32-byte keys, and incidentally SHA-256 digests |
 | `\b[1-9A-HJ-NP-Za-km-z]{80,90}\b` | Base58 Ed25519 secret keys (a 64-byte key encodes to 87–88 characters) |
 
@@ -866,7 +885,7 @@ for every path except those whose names match the forbidden list.
 ## The audit log
 
 `packages/server/src/security/audit.ts`. Append-only, hash-chained, one row per
-consequential action. The canonical action names live in `AUDIT_ACTIONS` — 35 of
+consequential action. The canonical action names live in `AUDIT_ACTIONS` — 34 of
 them, covering logins, user and role changes, settings changes, secret writes,
 every wallet operation, the concept lifecycle, every launch outcome, fee
 collection, emergency stop and release, autonomy and phase changes, model
@@ -920,9 +939,17 @@ curl -s --cookie "solcoin_session=…" \
 # {"valid":true,"checked":1841}
 ```
 
-`npm run doctor` also verifies the chain, over the most recent 20 000 entries,
-as part of its pre-flight checks; `container.diagnostics()` does the same over
-5 000. The default limit when called with no options is 100 000 entries.
+`npm run doctor` also verifies the chain as part of its pre-flight checks, with
+`limit: 20_000`; `container.diagnostics()` does the same with `limit: 5_000`.
+The default limit when called with no options is 100 000 entries.
+
+Read that limit carefully: `verifyChain` selects `ORDER BY sequence ASC LIMIT n`
+and walks forward from sequence 1, so the limit keeps the **oldest** *n*
+entries and never looks at anything newer. Once the log is longer than the
+limit, `doctor` is checking history rather than recent activity and a tampered
+recent entry goes unreported. `GET /api/system/audit/verify` passes no limit, so
+it walks up to 100 000 entries — which is everything only while the log is
+shorter than that.
 
 ### Limits of the audit chain
 
@@ -961,9 +988,14 @@ Defaults from `LimitSettings` in `packages/shared/src/domain/settings.ts`:
 | `maxAiSpendUsdPerDay` | $10 | ≥ 0 | AI provider cost per rolling 24 hours |
 | `walletBalanceFloorSol` | 0.05 SOL | ≥ 0 | Balance the operating wallet may not drop below |
 | `consecutiveFailureShutdown` | 3 | ≥ 1 | Consecutive launch failures before auto-stop |
-| `rpcFailureThreshold` | 8 | ≥ 1 | Consecutive RPC errors before the pool is marked down |
-| `maxTransactionRetries` | 3 | 0–10 | Retries per transaction |
-| `maxClockDriftSeconds` | 120 | ≥ 1 | Refuse to run if the machine clock drifts beyond this |
+| `rpcFailureThreshold` | 8 | ≥ 1 | **Nothing today.** Intended as the consecutive-RPC-error count before an endpoint is marked down, but `SolanaRpc` is constructed in `container.ts` without a `failureThreshold`, so the pool uses its own hard-coded default of 4 and this setting is inert |
+| `maxTransactionRetries` | 3 | 0–10 | **Nothing today.** No server code reads it; the send path passes `maxRetries: 0` to `sendRawTransaction` and manages resubmission itself |
+| `maxClockDriftSeconds` | 120 | ≥ 1 | The `clock` health component, which goes `degraded` past 25% of the limit and `down` past it. `down` on an essential component makes overall health `down`; it does **not** by itself stop a job or a launch |
+
+Only the first eight of those are read by `GuardService`. The last three are
+settings the guard never consults, and two of them are not consulted anywhere —
+they are listed here because the dashboard offers them and an operator will
+otherwise assume they do something.
 
 The windows are rolling, not calendar days — `now - TIME.day`, not midnight — so
 there is no reset moment an attacker or a runaway loop can wait for.
@@ -1033,9 +1065,12 @@ Operators can engage and release the stop manually through
 `POST /api/system/emergency-stop` and `/emergency-release`, both requiring the
 `emergency_stop` permission and a reason of 3–500 characters.
 
-Current usage against every limit is exposed by `guard.usage()` and surfaced at
-`GET /api/system/status`, so the dashboard shows how close the platform is to
-each ceiling rather than only telling you after it hits one.
+Current usage against the rate and spend limits — launches this hour and today,
+SOL this hour and today, AI dollars today, and the consecutive-failure count —
+is exposed by `guard.usage()` and surfaced at `GET /api/system/status`, so the
+dashboard shows how close the platform is to those ceilings rather than only
+telling you after it hits one. The per-transaction cap and the balance floor are
+not in that payload; they are only visible as a denial.
 
 ---
 
@@ -1064,7 +1099,11 @@ Two halves.
 - **No private literals.** `classifyAddress` covers loopback, link-local,
   RFC 1918, CGNAT, multicast and reserved ranges in both address families —
   including the IPv6 forms that embed an IPv4 address (`::ffff:0:0/96`, `::/96`,
-  `2002::/16`), which are exactly the forms an SSRF attempt reaches for.
+  `64:ff9b::/96` and `64:ff9b:1::/48` for NAT64, `2002::/16` for 6to4), which are
+  exactly the forms an SSRF attempt reaches for. `parseIpv6` decodes to bytes
+  rather than matching text, because `new URL()` re-serialises
+  `[::ffff:169.254.169.254]` to `::ffff:a9fe:a9fe` and a textual check would
+  never fire on it.
 
 **Resolution (`resolvesToPublicAddress`):** a perfectly public-looking hostname
 can resolve to `127.0.0.1` or to a metadata address. Every address the name
@@ -1122,8 +1161,10 @@ Ordered roughly by how much each one matters.
 - [ ] Disable core dumps for the process (`ulimit -c 0`). A core dump taken
       during a signing window contains the private key.
 - [ ] Encrypt backups of `data/`, and keep them somewhere the master key is not.
-- [ ] Keep the machine clock synchronised. `maxClockDriftSeconds` (120) will
-      refuse to run rather than sign against a bad clock.
+- [ ] Keep the machine clock synchronised. Drift beyond `maxClockDriftSeconds`
+      (120) turns the `clock` health component `down`, which shows up in
+      `npm run doctor` and `GET /api/system/status` — but nothing refuses to
+      sign on its own, so treat it as an alarm to act on, not a guard.
 
 **Wallet**
 

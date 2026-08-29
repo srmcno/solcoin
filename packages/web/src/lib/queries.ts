@@ -70,7 +70,7 @@ export const queryKeys = {
   providers: ['system', 'providers'] as const,
   secrets: ['system', 'secrets'] as const,
   audit: (filters: unknown) => ['system', 'audit', filters] as const,
-  logs: (filters: unknown) => ['system', 'logs'] as const,
+  logs: (filters: unknown) => ['system', 'logs', filters] as const,
   diagnostics: ['system', 'diagnostics'] as const,
   settings: ['settings'] as const,
   phases: ['settings', 'phases'] as const,

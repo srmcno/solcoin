@@ -179,6 +179,15 @@ interface ForecastScenario {
   netIncomeSol?: number;
 }
 
+/**
+ * Only used for the network the platform is currently executing against. Every
+ * endpoint on this page is scoped to it server-side, and on `simulation` none
+ * of the money below moved.
+ */
+interface SystemStatus {
+  network?: string;
+}
+
 interface Forecast {
   sufficient?: boolean;
   reason?: string;
@@ -199,12 +208,14 @@ interface Forecast {
 
 // --- Static configuration --------------------------------------------------
 
-const RANGES: Array<{ id: RangeKey; label: string }> = [
-  { id: '7d', label: '7 days' },
-  { id: '30d', label: '30 days' },
-  { id: '90d', label: '90 days' },
-  { id: '1y', label: '1 year' },
-  { id: 'all', label: 'All time' },
+// `short` is what fits five buttons across a 375px phone; `label` is the
+// accessible name, so the control never becomes "7d" to a screen reader.
+const RANGES: Array<{ id: RangeKey; label: string; short: string }> = [
+  { id: '7d', label: 'Last 7 days', short: '7d' },
+  { id: '30d', label: 'Last 30 days', short: '30d' },
+  { id: '90d', label: 'Last 90 days', short: '90d' },
+  { id: '1y', label: 'Last year', short: '1y' },
+  { id: 'all', label: 'All time', short: 'All' },
 ];
 
 type MetricKey = 'creator_fees_sol' | 'launches' | 'organic_volume_sol' | 'spend_sol' | 'ai_spend_usd';
@@ -287,9 +298,17 @@ export default function AnalyticsPage() {
   const forecastQuery = useApiQuery<Forecast>(queryKeys.analyticsForecast, '/api/analytics/forecast', {
     refetchInterval: POLL.slow,
   });
+  // Every endpoint here is scoped to the configured execution network. The P&L
+  // response states which one it used; system status covers the case where that
+  // query has not landed yet.
+  const statusQuery = useApiQuery<SystemStatus>(queryKeys.systemStatus, '/api/system/status', {
+    refetchInterval: POLL.slow,
+  });
 
   const distribution = distributionQuery.data;
   const pnl = pnlQuery.data;
+  const network = pnl?.network ?? statusQuery.data?.network;
+  const simulated = network === 'simulation';
 
   // "Nothing has happened yet" is a different state from "this range is empty",
   // and only the first one deserves an onboarding screen.
@@ -300,6 +319,10 @@ export default function AnalyticsPage() {
     !pnlQuery.isError &&
     (distribution?.n ?? 0) === 0 &&
     (pnl?.launches ?? 0) === 0 &&
+    // Fees can land in a window that contains no launches of its own. That is
+    // real revenue and must not be replaced by an onboarding screen.
+    (pnl?.revenueRealisedSol ?? 0) === 0 &&
+    (pnl?.costs?.totalSol ?? 0) === 0 &&
     (signalsQuery.data?.signals?.length ?? 0) === 0;
 
   return (
@@ -309,6 +332,21 @@ export default function AnalyticsPage() {
         description="Where the revenue actually comes from, what it costs to produce, and which of the platform's own signals have any relationship to the outcome."
         action={<RangeSelector value={range} onChange={setRange} />}
       />
+
+      {simulated ? (
+        <Note tone="warning">
+          <strong className="font-semibold">Every figure on this page describes simulated activity.</strong> The platform is
+          configured for the <code className="font-mono">simulation</code> network, so launches and fee claims are executed
+          against the simulation adapter: the mint addresses, transaction signatures and fee amounts are all fabricated and
+          no SOL has moved. The revenue, profit, attribution and forecast panels below are a test of the pipeline, not a
+          record of money earned. Nothing here should be quoted as a result.
+        </Note>
+      ) : network ? (
+        <p className="text-xs text-ink-subtle">
+          Revenue, launches and attribution are scoped to the{' '}
+          <span className="font-medium text-ink-muted">{humanise(network)}</span> network.
+        </p>
+      ) : null}
 
       {nothingYet ? (
         <Card>
@@ -355,6 +393,8 @@ function RangeSelector({ value, onChange }: { value: RangeKey; onChange: (next: 
             key={option.id}
             type="button"
             aria-pressed={active}
+            aria-label={option.label}
+            title={option.label}
             onClick={() => onChange(option.id)}
             className={
               active
@@ -362,7 +402,7 @@ function RangeSelector({ value, onChange }: { value: RangeKey; onChange: (next: 
                 : 'rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-ink-subtle transition-colors hover:bg-surface-hover hover:text-ink'
             }
           >
-            {option.label}
+            {option.short}
           </button>
         );
       })}
@@ -538,11 +578,13 @@ function DistributionBody({ data }: { data: Distribution }) {
         that will not arrive. This panel exists to make that visible rather than to let the average stand alone.
       </Note>
 
-      {n < minReliable && (
+      {(data.reliable === false || n < minReliable) && (
         <Note tone="warning">
-          Only {formatNumber(n)} token{n === 1 ? '' : 's'} in this range, below the {formatNumber(minReliable)} the service
-          treats as the minimum for shape statistics. With a sample this small the Gini coefficient and the tail shares are
-          artefacts of how few tokens there are: a single token makes the Gini 0 and the top-1% share 100% at the same time.
+          The service flags this sample as too small to describe a distribution: {formatNumber(n)} token
+          {n === 1 ? '' : 's'}, against the {formatNumber(minReliable)} it treats as the minimum for shape statistics. With a
+          sample this small the Gini coefficient and the tail shares are artefacts of how few tokens there are — a single
+          token makes the Gini 0 and the top-1% share 100% at the same time. Read the percentiles above as a list of what
+          these particular tokens earned, not as an estimate of the distribution.
         </Note>
       )}
 
@@ -557,6 +599,15 @@ function DistributionBody({ data }: { data: Distribution }) {
 
 function PnLPanel({ query, range }: { query: QueryLike<PnL>; range: RangeKey }) {
   const data = query.data;
+  // `sufficient: false` means "no launches in the window", which the service
+  // spells out as "only ledger totals are meaningful" — not "show nothing".
+  // Fees claimed in a window with no launches are still real revenue, so the
+  // ledger half of the panel stays and only the per-launch half is withheld.
+  const ledgerHasMovement =
+    (data?.revenueRealisedSol ?? 0) !== 0 ||
+    (data?.costs?.totalSol ?? 0) !== 0 ||
+    (data?.costs?.operatingUsd ?? 0) !== 0 ||
+    (data?.revenueAccruedUnclaimedSol ?? 0) !== 0;
 
   return (
     <Card>
@@ -569,14 +620,14 @@ function PnLPanel({ query, range }: { query: QueryLike<PnL>; range: RangeKey }) 
           <LoadingRows rows={4} />
         ) : query.isError ? (
           <ErrorState error={query.error} onRetry={() => void query.refetch()} />
-        ) : !data || data.sufficient === false ? (
+        ) : !data || (data.sufficient === false && !ledgerHasMovement) ? (
           <EmptyState
             icon="▤"
-            title="No launches fell in this range"
+            title="Nothing was earned or spent in this range"
             description={
               <>
-                {data?.reason ?? 'There is nothing to attribute revenue or cost to in this window.'} P&amp;L needs at least
-                one launch before ROI, profit per launch or a break-even rate mean anything.
+                {data?.reason ?? 'There is nothing to attribute revenue or cost to in this window.'} No launch, no claimed
+                fee and no recorded cost falls in this window, so there is no total to state and nothing to divide.
                 {range !== 'all' ? ' Widen the range to All time to see everything recorded so far.' : ''}
               </>
             }
@@ -590,6 +641,9 @@ function PnLPanel({ query, range }: { query: QueryLike<PnL>; range: RangeKey }) 
 }
 
 function PnLBody({ data }: { data: PnL }) {
+  // With no launches in the window every per-launch figure is a division by
+  // zero cohort. The ledger totals survive; the unit economics do not.
+  const cohort = data.sufficient !== false;
   const costs = data.costs;
   const net = data.netProfitSol;
   const netUnknown = net === null || net === undefined;
@@ -599,6 +653,15 @@ function PnLBody({ data }: { data: PnL }) {
 
   return (
     <div className="space-y-4">
+      {!cohort && (
+        <Note tone="warning">
+          {data.reason ?? 'No launches fell in this window.'} The ledger totals below are still exactly what was claimed and
+          spent, but everything computed per launch — ROI attribution, profit per launch, the break-even rate, cost per
+          success and the fee distribution across a cohort — has no cohort to describe and is withheld rather than reported
+          as zero.
+        </Note>
+      )}
+
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
         <StatTile
           label="Revenue (claimed)"
@@ -641,18 +704,20 @@ function PnLBody({ data }: { data: PnL }) {
               : 'Net profit divided by total cost'
           }
         />
-        <StatTile
-          label="Profit per launch"
-          value={
-            data.profitPerLaunchSol === null || data.profitPerLaunchSol === undefined
-              ? '—'
-              : formatSol(data.profitPerLaunchSol, { sign: true })
-          }
-          hint={`An aggregate divided by ${formatNumber(data.launches)} launches — not what a launch earns`}
-        />
+        {cohort && (
+          <StatTile
+            label="Profit per launch"
+            value={
+              data.profitPerLaunchSol === null || data.profitPerLaunchSol === undefined
+                ? '—'
+                : formatSol(data.profitPerLaunchSol, { sign: true })
+            }
+            hint={`An aggregate divided by ${formatNumber(data.launches)} launches — not what a launch earns`}
+          />
+        )}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={cohort ? 'grid gap-4 lg:grid-cols-2' : ''}>
         <div>
           <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-subtle">Costs by kind</h3>
           {byKind.length === 0 ? (
@@ -697,84 +762,86 @@ function PnLBody({ data }: { data: PnL }) {
           )}
         </div>
 
-        <div className="space-y-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-subtle">Unit economics</h3>
-          <dl className="divide-y divide-border/60 text-sm">
-            <UnitRow
-              term="Break-even rate"
-              value={
-                breakEven?.point === undefined ? (
-                  '—'
-                ) : (
+        {cohort && (
+          <div className="space-y-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-subtle">Unit economics</h3>
+            <dl className="divide-y divide-border/60 text-sm">
+              <UnitRow
+                term="Break-even rate"
+                value={
+                  breakEven?.point === undefined ? (
+                    '—'
+                  ) : (
+                    <span className="tnum">
+                      {formatPercent(breakEven.point, 0)}{' '}
+                      <span className="text-xs text-ink-subtle">
+                        [{formatPercent(breakEven.lower, 0)} – {formatPercent(breakEven.upper, 0)}]
+                      </span>
+                    </span>
+                  )
+                }
+                detail={
+                  breakEven?.n !== undefined ? (
+                    <span className="flex items-center gap-2">
+                      <SampleSize n={breakEven.n} />
+                      <span>
+                        {formatNumber(breakEven.successes)} launch{breakEven.successes === 1 ? '' : 'es'} whose own fees covered
+                        their own cost
+                      </span>
+                    </span>
+                  ) : undefined
+                }
+              />
+              <UnitRow
+                term="Cost per successful launch"
+                value={
+                  data.costPerSuccessfulLaunchSol === null || data.costPerSuccessfulLaunchSol === undefined
+                    ? '—'
+                    : formatSol(data.costPerSuccessfulLaunchSol)
+                }
+                detail={`${formatNumber(data.successes)} of ${formatNumber(data.launches)} launches reached the success bar`}
+              />
+              <UnitRow
+                term="Revenue per 1,000 SOL of organic volume"
+                value={
+                  data.revenuePer1000SolVolume === null || data.revenuePer1000SolVolume === undefined
+                    ? '—'
+                    : formatSol(data.revenuePer1000SolVolume)
+                }
+                detail={`Take rate over ${formatSol(data.organicVolumeSol)} of organic volume from the same cohort`}
+              />
+              <UnitRow
+                term="Fees per launch (mean / median)"
+                value={
                   <span className="tnum">
-                    {formatPercent(breakEven.point, 0)}{' '}
-                    <span className="text-xs text-ink-subtle">
-                      [{formatPercent(breakEven.lower, 0)} – {formatPercent(breakEven.upper, 0)}]
-                    </span>
+                    {formatSol(perLaunch?.meanSol)} <span className="text-ink-subtle">/</span> {formatSol(perLaunch?.medianSol)}
                   </span>
-                )
-              }
-              detail={
-                breakEven?.n !== undefined ? (
-                  <span className="flex items-center gap-2">
-                    <SampleSize n={breakEven.n} />
-                    <span>
-                      {formatNumber(breakEven.successes)} launch{breakEven.successes === 1 ? '' : 'es'} whose own fees covered
-                      their own cost
+                }
+                detail={
+                  perLaunch?.n !== undefined ? (
+                    <span className="flex flex-wrap items-center gap-2">
+                      <SampleSize n={perLaunch.n} />
+                      <span>
+                        p90 {formatSol(perLaunch.p90Sol)} · best tenth took {formatPercent(perLaunch.topTenPercentShare, 0)} of
+                        cohort revenue
+                      </span>
                     </span>
-                  </span>
-                ) : undefined
-              }
-            />
-            <UnitRow
-              term="Cost per successful launch"
-              value={
-                data.costPerSuccessfulLaunchSol === null || data.costPerSuccessfulLaunchSol === undefined
-                  ? '—'
-                  : formatSol(data.costPerSuccessfulLaunchSol)
-              }
-              detail={`${formatNumber(data.successes)} of ${formatNumber(data.launches)} launches reached the success bar`}
-            />
-            <UnitRow
-              term="Revenue per 1,000 SOL of organic volume"
-              value={
-                data.revenuePer1000SolVolume === null || data.revenuePer1000SolVolume === undefined
-                  ? '—'
-                  : formatSol(data.revenuePer1000SolVolume)
-              }
-              detail={`Take rate over ${formatSol(data.organicVolumeSol)} of organic volume from the same cohort`}
-            />
-            <UnitRow
-              term="Fees per launch (mean / median)"
-              value={
-                <span className="tnum">
-                  {formatSol(perLaunch?.meanSol)} <span className="text-ink-subtle">/</span> {formatSol(perLaunch?.medianSol)}
-                </span>
-              }
-              detail={
-                perLaunch?.n !== undefined ? (
-                  <span className="flex flex-wrap items-center gap-2">
-                    <SampleSize n={perLaunch.n} />
-                    <span>
-                      p90 {formatSol(perLaunch.p90Sol)} · best tenth took {formatPercent(perLaunch.topTenPercentShare, 0)} of
-                      cohort revenue
-                    </span>
-                  </span>
-                ) : undefined
-              }
-            />
-          </dl>
-        </div>
+                  ) : undefined
+                }
+              />
+            </dl>
+          </div>
+        )}
       </div>
 
-      {perLaunch?.reliable === false && (
+      {cohort && perLaunch?.reliable === false && (
         <Note tone="warning">
           The per-launch fee statistics come from {formatNumber(perLaunch.n)} launches, which the service flags as too few to
           be reliable. Treat the mean, median and p90 above as a description of those specific launches, not as an estimate
           of what the next one will earn.
         </Note>
       )}
-      {breakEven?.reliable === false && (
+      {cohort && breakEven?.reliable === false && (
         <Note tone="warning">
           The break-even rate is computed from {formatNumber(breakEven.n)} launches. Its interval is wide enough to contain
           almost any true value; it is shown so the width is visible, not so the point estimate can be quoted.
@@ -1068,23 +1135,29 @@ function SignalsPanel({ query }: { query: QueryLike<SignalsResponse> }) {
   const signals = useMemo(() => query.data?.signals ?? [], [query.data]);
   const [openFeature, setOpenFeature] = useState<string | null>(null);
 
-  // The service appends the same base caveat to every row; the most common
-  // string is that base text, which is what belongs at the top of the panel.
+  /**
+   * The service gives every row the same base caveat, prefixed with a
+   * feature-specific sentence where one applies. A row with nothing specific to
+   * say — measurable, and with an interval — carries the base text verbatim, so
+   * that is the one text known to apply to the whole panel.
+   *
+   * Picking the most frequent string instead would promote one feature's own
+   * caveat to a panel-wide claim the moment every feature had a specific one,
+   * which is a misattribution rather than a shortcut. When no row carries the
+   * base alone, the fallback is the caveat that every other row ends with; if
+   * even that does not exist, nothing is claimed to be shared.
+   */
   const sharedCaveat = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const signal of signals) {
-      if (!signal.caveat) continue;
-      counts.set(signal.caveat, (counts.get(signal.caveat) ?? 0) + 1);
-    }
-    let best: string | null = null;
-    let bestCount = 0;
-    for (const [text, count] of counts) {
-      if (count > bestCount || (count === bestCount && best !== null && text.length < best.length)) {
-        best = text;
-        bestCount = count;
-      }
-    }
-    return best;
+    const texts = signals.map((signal) => signal.caveat).filter((text): text is string => Boolean(text));
+    if (texts.length === 0) return null;
+
+    const clean = signals.find(
+      (signal) => signal.caveat && !signal.degenerate && signal.lower !== null && signal.lower !== undefined,
+    );
+    if (clean?.caveat) return clean.caveat;
+
+    const shortest = [...texts].sort((a, b) => a.length - b.length)[0]!;
+    return texts.every((text) => text.endsWith(shortest)) ? shortest : null;
   }, [signals]);
 
   return (
@@ -1107,7 +1180,14 @@ function SignalsPanel({ query }: { query: QueryLike<SignalsResponse> }) {
           />
         ) : (
           <>
-            {sharedCaveat && <Note tone="warning">{sharedCaveat}</Note>}
+            {sharedCaveat ? (
+              <Note tone="warning">{sharedCaveat}</Note>
+            ) : (
+              <Note tone="warning">
+                Every feature below carries a caveat of its own — none of them is measurable on this sample in the ordinary
+                way. Open <span className="font-medium">Why</span> on each row before reading its coefficient.
+              </Note>
+            )}
 
             <DataTable>
               <thead>

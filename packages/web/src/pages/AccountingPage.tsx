@@ -61,6 +61,8 @@ interface CategoryTotal {
   amountSol?: number;
   amountUsd?: number;
   entriesMissingUsd?: number;
+  /** Null when no entry in the bucket carried a USD valuation. */
+  usdCoverage?: number | null;
   countsTowardPnl?: boolean;
 }
 
@@ -72,13 +74,23 @@ interface AccountingSummary {
   revenueSol?: number;
   costSol?: number;
   netSol?: number;
-  revenueUsd?: number;
-  costUsd?: number;
-  netUsd?: number;
+  // Null, never zero, where the valued subset is empty: zero would read as
+  // "no money", which is a different and usually false statement.
+  revenueUsd?: number | null;
+  costUsd?: number | null;
+  netUsd?: number | null;
   entriesMissingUsd?: number;
   usdCoverage?: number;
+  /** Valuation coverage per side; the two routinely differ. */
+  revenueEntryCount?: number;
+  revenueEntriesMissingUsd?: number;
+  costEntryCount?: number;
+  costEntriesMissingUsd?: number;
   entriesMissingSol?: number;
   transferCount?: number;
+  transferInSol?: number;
+  transferOutSol?: number;
+  /** Gross movement, in + out. Not a balance. */
   transferSol?: number;
   notes?: string[];
   disclaimer?: string;
@@ -97,6 +109,9 @@ interface MonthlyRow {
   revenueUsd?: number | null;
   costUsd?: number | null;
   netUsd?: number | null;
+  /** P&L entries behind the month's totals, and how many carried no price. */
+  entryCount?: number;
+  entriesMissingUsd?: number;
   launches?: number;
 }
 
@@ -104,12 +119,19 @@ interface MonthlyResponse {
   months?: MonthlyRow[];
 }
 
-const RANGES: Array<{ id: RangeKey; label: string }> = [
-  { id: '7d', label: '7 days' },
-  { id: '30d', label: '30 days' },
-  { id: '90d', label: '90 days' },
-  { id: '1y', label: '1 year' },
-  { id: 'all', label: 'All time' },
+/** The network the platform is currently executing against. */
+interface SystemStatus {
+  network?: string;
+}
+
+// `short` is what fits five buttons across a 375px phone; `label` is the
+// accessible name, so the control never becomes "7d" to a screen reader.
+const RANGES: Array<{ id: RangeKey; label: string; short: string }> = [
+  { id: '7d', label: 'Last 7 days', short: '7d' },
+  { id: '30d', label: 'Last 30 days', short: '30d' },
+  { id: '90d', label: 'Last 90 days', short: '90d' },
+  { id: '1y', label: 'Last year', short: '1y' },
+  { id: 'all', label: 'All time', short: 'All' },
 ];
 
 const PAGE_SIZES = [50, 100, 200] as const;
@@ -137,11 +159,21 @@ export default function AccountingPage() {
   const monthlyQuery = useApiQuery<MonthlyResponse>(queryKeys.accountingMonthly, '/api/accounting/monthly', {
     refetchInterval: POLL.slow,
   });
+  // Ledger entries from off-chain sources carry no network of their own, so the
+  // explorer links need the network the platform is running against — and on
+  // simulation there is no chain to link to at all.
+  const statusQuery = useApiQuery<SystemStatus>(queryKeys.systemStatus, '/api/system/status', {
+    refetchInterval: POLL.slow,
+  });
+  const platformNetwork = statusQuery.data?.network;
 
   const summary = ledgerQuery.data?.summary;
   const entries = ledgerQuery.data?.entries ?? [];
   const total = summary?.entryCount ?? 0;
   const canExport = can('export_accounting');
+  // Only counted over the page in hand: the summary carries no network split,
+  // so a claim about the whole range would be one this page cannot support.
+  const simulatedOnPage = entries.filter((entry) => entry.network === 'simulation').length;
 
   const changeRange = (next: RangeKey) => {
     setRange(next);
@@ -165,35 +197,33 @@ export default function AccountingPage() {
       <SectionHeader
         title="Accounting"
         description="Every economic event the platform caused, as it was recorded. Nothing here is smoothed, estimated or back-filled."
-        action={
-          <div className="flex flex-wrap items-center gap-2">
-            <RangeSelector value={range} onChange={changeRange} />
-            {canExport && (
-              <>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={exporting !== null}
-                  onClick={() => void runExport('csv')}
-                >
-                  {exporting === 'csv' ? 'Preparing…' : 'Export CSV'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={exporting !== null}
-                  onClick={() => void runExport('json')}
-                >
-                  {exporting === 'json' ? 'Preparing…' : 'Export JSON'}
-                </button>
-              </>
-            )}
-          </div>
-        }
+        action={<RangeSelector value={range} onChange={changeRange} />}
       />
 
       {canExport ? (
-        <p className="text-xs text-ink-subtle">Exports always cover the full ledger, not the selected range, and are recorded in the audit log.</p>
+        // Kept out of the header action so the row cannot outgrow a 375px
+        // screen, and so the buttons sit beside the caveat that qualifies them.
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={exporting !== null}
+            onClick={() => void runExport('csv')}
+          >
+            {exporting === 'csv' ? 'Preparing…' : 'Export CSV'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={exporting !== null}
+            onClick={() => void runExport('json')}
+          >
+            {exporting === 'json' ? 'Preparing…' : 'Export JSON'}
+          </button>
+          <p className="text-xs text-ink-subtle">
+            Exports always cover the full ledger, not the selected range, and are recorded in the audit log.
+          </p>
+        </div>
       ) : (
         <Note>
           Exporting the ledger requires the <code className="font-mono">export_accounting</code> permission, which this
@@ -203,9 +233,31 @@ export default function AccountingPage() {
 
       {exportError && <Note tone="negative">Export failed: {exportError}</Note>}
 
+      {platformNetwork === 'simulation' && (
+        <Note tone="warning">
+          <strong className="font-semibold">The platform is running on the simulation network.</strong> Launches and fee
+          claims are executed against the simulation adapter, which fabricates mint addresses, transaction signatures and
+          amounts. Entries produced that way are recorded in this ledger exactly like real ones, so the revenue, cost and
+          net figures below can include money that never moved. Rows marked <em>simulated</em> carry no explorer link
+          because there is no chain behind them.
+        </Note>
+      )}
+
+      {platformNetwork !== 'simulation' && simulatedOnPage > 0 && (
+        <Note tone="warning">
+          {formatNumber(simulatedOnPage)} of the {formatNumber(entries.length)} entr
+          {entries.length === 1 ? 'y' : 'ies'} on this page {simulatedOnPage === 1 ? 'was' : 'were'} recorded against the
+          simulation network. No SOL moved for {simulatedOnPage === 1 ? 'it' : 'them'}, but{' '}
+          {simulatedOnPage === 1 ? 'it counts' : 'they count'} toward the totals above, which the accounting service does
+          not split by network.
+        </Note>
+      )}
+
       {summary?.disclaimer && <Note tone="warning">{summary.disclaimer}</Note>}
 
       <SummaryTiles query={ledgerQuery} />
+
+      <CategoryPanel query={ledgerQuery} />
 
       <MonthlyPanel query={monthlyQuery} />
 
@@ -256,7 +308,7 @@ export default function AccountingPage() {
             />
           ) : (
             <>
-              <LedgerTable entries={entries} />
+              <LedgerTable entries={entries} platformNetwork={platformNetwork} />
               <Pagination
                 offset={offset}
                 limit={limit}
@@ -299,6 +351,8 @@ function RangeSelector({ value, onChange }: { value: RangeKey; onChange: (next: 
             key={option.id}
             type="button"
             aria-pressed={active}
+            aria-label={option.label}
+            title={option.label}
             onClick={() => onChange(option.id)}
             className={
               active
@@ -306,7 +360,7 @@ function RangeSelector({ value, onChange }: { value: RangeKey; onChange: (next: 
                 : 'rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-ink-subtle transition-colors hover:bg-surface-hover hover:text-ink'
             }
           >
-            {option.label}
+            {option.short}
           </button>
         );
       })}
@@ -323,6 +377,27 @@ interface QueryLike<T> {
 }
 
 // --- Summary ---------------------------------------------------------------
+
+/**
+ * A USD total is only as good as the share of entries that carried a price when
+ * the event happened, so it is never shown without that share. A null total is
+ * stated as unvalued rather than rendered as an em dash on its own — the reader
+ * needs to know a number is missing, not merely absent.
+ */
+function usdHint(
+  usd: number | null | undefined,
+  entryCount: number | undefined,
+  missing: number | undefined,
+  side: 'revenue' | 'cost',
+): string {
+  if (usd === null || usd === undefined) {
+    return `No ${side} entry in range carried a recorded SOL price, so there is no USD total to state.`;
+  }
+  const total = entryCount ?? 0;
+  const priced = Math.max(0, total - (missing ?? 0));
+  if (total === 0) return `${formatUsd(usd)} across the entries that carry a recorded USD value`;
+  return `${formatUsd(usd)} across ${formatNumber(priced)} of ${formatNumber(total)} ${side} entries — the rest carried no recorded price`;
+}
 
 function SummaryTiles({ query }: { query: QueryLike<LedgerResponse> }) {
   if (query.isLoading) {
@@ -367,18 +442,20 @@ function SummaryTiles({ query }: { query: QueryLike<LedgerResponse> }) {
           label="Revenue"
           value={formatSol(summary?.revenueSol)}
           tone={(summary?.revenueSol ?? 0) > 0 ? 'positive' : 'neutral'}
-          hint={`${formatUsd(summary?.revenueUsd)} across the entries that carry a recorded USD value`}
+          hint={usdHint(summary?.revenueUsd, summary?.revenueEntryCount, summary?.revenueEntriesMissingUsd, 'revenue')}
         />
         <StatTile
           label="Costs"
           value={formatSol(summary?.costSol)}
-          hint={`${formatUsd(summary?.costUsd)} across the entries that carry a recorded USD value`}
+          hint={usdHint(summary?.costUsd, summary?.costEntryCount, summary?.costEntriesMissingUsd, 'cost')}
         />
         <StatTile
           label="Net"
           value={net === undefined ? '—' : formatSol(net, { sign: true })}
           tone={net === undefined ? 'neutral' : net >= 0 ? 'positive' : 'negative'}
-          hint={`${formatNumber(entryCount)} entries · ${formatNumber(summary?.transferCount)} internal transfers (${formatSol(summary?.transferSol)}) excluded`}
+          hint={`Over ${formatNumber(entryCount)} entries. ${formatNumber(summary?.transferCount)} internal transfer${
+            (summary?.transferCount ?? 0) === 1 ? '' : 's'
+          } excluded: ${formatSol(summary?.transferInSol)} in, ${formatSol(summary?.transferOutSol)} out`}
         />
         <StatTile
           label="Entries without a USD value"
@@ -400,6 +477,101 @@ function SummaryTiles({ query }: { query: QueryLike<LedgerResponse> }) {
         </Note>
       )}
     </div>
+  );
+}
+
+// --- Category breakdown ----------------------------------------------------
+
+/**
+ * The summary's own bucketing, shown as it arrives. Buckets are keyed by
+ * category *and* direction — `wallet_transfer` carries both an inbound and an
+ * outbound stream — so the two are listed separately rather than netted.
+ */
+function CategoryPanel({ query }: { query: QueryLike<LedgerResponse> }) {
+  const rows = (query.data?.summary?.byCategory ?? []).filter((row) => Boolean(row?.category));
+  const sorted = [...rows].sort((a, b) => Math.abs(b.amountSol ?? 0) - Math.abs(a.amountSol ?? 0));
+
+  // Loading, error and empty are all already stated by the summary tiles above,
+  // which read the same query. Repeating them here would show one failure three
+  // times, so this panel simply stands down until it has rows.
+  if (query.isLoading || query.isError || sorted.length === 0) return null;
+
+  return (
+    <Card>
+      <SectionHeader
+        title="By category"
+        description="Where the SOL in this range came from and went, split by category and direction. Every bucket carries the number of entries behind it."
+      />
+      <div className="mt-4">
+        <DataTable>
+          <thead>
+            <tr>
+              <Th>Category</Th>
+              <Th>Direction</Th>
+              <Th align="right">Entries</Th>
+              <Th align="right">SOL</Th>
+              <Th align="right">USD</Th>
+              <Th>In P&amp;L</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((row) => {
+              const revenue = row.type === 'revenue';
+              const missing = row.entriesMissingUsd ?? 0;
+              const count = row.entryCount ?? 0;
+              return (
+                <tr key={`${row.category}-${row.type}`}>
+                  <Td className="font-medium text-ink">{humanise(row.category)}</Td>
+                  <Td>
+                    <Badge tone={revenue ? 'positive' : 'neutral'}>{revenue ? '↑ Revenue' : '↓ Expense'}</Badge>
+                  </Td>
+                  <Td align="right" className="tnum">
+                    {formatNumber(count)}
+                  </Td>
+                  <Td align="right" className={`tnum ${revenue ? 'text-positive' : 'text-ink'}`}>
+                    {formatSol(row.amountSol)}
+                  </Td>
+                  <Td align="right" className="tnum whitespace-nowrap">
+                    {row.usdCoverage === null || row.usdCoverage === undefined || missing >= count ? (
+                      <span
+                        className="text-ink-subtle"
+                        title="No entry in this bucket carried a SOL price at the time of the event"
+                      >
+                        not valued
+                      </span>
+                    ) : (
+                      <>
+                        {formatUsd(row.amountUsd)}
+                        {missing > 0 && (
+                          <span
+                            className="ml-1 text-xs text-warning"
+                            title={`${missing} of ${count} entries in this bucket carried no recorded price and are excluded from the USD figure`}
+                          >
+                            {formatPercent(row.usdCoverage, 0)} priced
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </Td>
+                  <Td>
+                    {row.countsTowardPnl === false ? (
+                      <span
+                        className="text-xs text-ink-subtle"
+                        title="A movement between the platform's own wallets, excluded from revenue, costs and net"
+                      >
+                        excluded
+                      </span>
+                    ) : (
+                      <span className="text-xs text-ink-subtle">counted</span>
+                    )}
+                  </Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </DataTable>
+      </div>
+    </Card>
   );
 }
 
@@ -467,6 +639,7 @@ function MonthlyPanel({ query }: { query: QueryLike<MonthlyResponse> }) {
                   <Th align="right">Cost</Th>
                   <Th align="right">Net</Th>
                   <Th align="right">Net (USD)</Th>
+                  <Th align="right">Entries</Th>
                   <Th align="right">Launches</Th>
                 </tr>
               </thead>
@@ -488,11 +661,25 @@ function MonthlyPanel({ query }: { query: QueryLike<MonthlyResponse> }) {
                       </Td>
                       <Td align="right" className="tnum">
                         {row.netUsd === null || row.netUsd === undefined ? (
-                          <span className="text-ink-subtle" title="No entry in this month carried a recorded SOL price">
+                          <span
+                            className="text-ink-subtle"
+                            title="A net USD figure needs both sides priced; at least one side of this month carried no recorded SOL price"
+                          >
                             not valued
                           </span>
                         ) : (
                           formatUsd(row.netUsd)
+                        )}
+                      </Td>
+                      <Td align="right" className="tnum whitespace-nowrap">
+                        {formatNumber(row.entryCount)}
+                        {(row.entriesMissingUsd ?? 0) > 0 && (
+                          <span
+                            className="ml-1 text-xs text-warning"
+                            title={`${row.entriesMissingUsd} of them carried no recorded SOL price and are excluded from every USD figure for this month`}
+                          >
+                            {formatNumber(row.entriesMissingUsd)} unpriced
+                          </span>
                         )}
                       </Td>
                       <Td align="right" className="tnum">
@@ -505,9 +692,10 @@ function MonthlyPanel({ query }: { query: QueryLike<MonthlyResponse> }) {
             </DataTable>
 
             <Note>
-              A month shows &ldquo;not valued&rdquo; in USD when none of its entries carried a SOL price at the time of the
-              event. Those months are not converted at today&rsquo;s rate, because doing so would silently restate past
-              results every time SOL moves.
+              A month shows &ldquo;not valued&rdquo; in USD unless <em>both</em> its revenue and its cost side carried a
+              recorded SOL price: netting a valued revenue total against an unvalued cost total would manufacture a profit
+              out of missing prices. Nothing is converted at today&rsquo;s rate either, because doing so would silently
+              restate past results every time SOL moves. The entry counts show how much of each month is priced.
             </Note>
           </div>
         )}
@@ -539,7 +727,7 @@ function MonthlyTooltip({ active, payload }: TooltipProps<number, string>) {
 
 // --- Ledger table ----------------------------------------------------------
 
-function LedgerTable({ entries }: { entries: LedgerEntry[] }) {
+function LedgerTable({ entries, platformNetwork }: { entries: LedgerEntry[]; platformNetwork: string | undefined }) {
   return (
     <DataTable>
       <thead>
@@ -576,7 +764,20 @@ function LedgerTable({ entries }: { entries: LedgerEntry[] }) {
                 </span>
               </Td>
               <Td align="right" className={`tnum whitespace-nowrap ${revenue ? 'text-positive' : 'text-ink'}`}>
-                {amount === 0 ? '—' : `${revenue ? '+' : '−'}${formatSol(Math.abs(amount))}`}
+                {amount === 0 ? (
+                  <span
+                    className="text-ink-subtle"
+                    title={
+                      entry.amountUsd === null || entry.amountUsd === undefined
+                        ? 'No SOL amount was recorded for this entry'
+                        : 'Billed in USD with no SOL price recorded, so it has no SOL amount and does not move the SOL totals'
+                    }
+                  >
+                    —
+                  </span>
+                ) : (
+                  `${revenue ? '+' : '−'}${formatSol(Math.abs(amount))}`
+                )}
                 {entry.solDerivedFromUsd && (
                   <span className="ml-1 text-xs text-ink-subtle" title="Converted from a USD amount at the SOL price recorded for this event">
                     est.
@@ -593,9 +794,21 @@ function LedgerTable({ entries }: { entries: LedgerEntry[] }) {
                 )}
               </Td>
               <Td className="whitespace-nowrap">
-                <ReferenceCell reference={entry.reference} network={entry.network} />
+                <ReferenceCell reference={entry.reference} network={entry.network} platformNetwork={platformNetwork} />
               </Td>
-              <Td className="whitespace-nowrap text-ink-subtle">{entry.network ? humanise(entry.network) : '—'}</Td>
+              <Td className="whitespace-nowrap">
+                {entry.network === 'simulation' ? (
+                  <Badge tone="warning">
+                    <span aria-hidden="true">◇</span> Simulated
+                  </Badge>
+                ) : entry.network ? (
+                  <span className="text-ink-subtle">{humanise(entry.network)}</span>
+                ) : (
+                  <span className="text-ink-subtle" title="This source records no network; an off-chain cost has none">
+                    —
+                  </span>
+                )}
+              </Td>
             </tr>
           );
         })}
@@ -604,8 +817,32 @@ function LedgerTable({ entries }: { entries: LedgerEntry[] }) {
   );
 }
 
-function ReferenceCell({ reference, network }: { reference: string | null | undefined; network: string | null | undefined }) {
+function ReferenceCell({
+  reference,
+  network,
+  platformNetwork,
+}: {
+  reference: string | null | undefined;
+  network: string | null | undefined;
+  platformNetwork: string | undefined;
+}) {
   if (!reference) return <span className="text-ink-subtle">—</span>;
+
+  // A simulated event never touched a chain: its signature was invented by the
+  // simulation adapter and must never be dressed up as an explorer link.
+  if (network === 'simulation') {
+    return (
+      <span
+        className="font-mono text-xs text-ink-subtle"
+        title="Fabricated by the simulation adapter — this reference does not exist on any chain"
+      >
+        {truncateAddress(reference, 6)} (not on chain)
+      </span>
+    );
+  }
+
+  // Internal ids, not signatures: a link would imply an on-chain record that
+  // does not exist.
   if (!SIGNATURE_PATTERN.test(reference)) {
     return (
       <span className="font-mono text-xs text-ink-muted" title={reference}>
@@ -613,10 +850,26 @@ function ReferenceCell({ reference, network }: { reference: string | null | unde
       </span>
     );
   }
+
+  // Off-chain sources record no network. Falling back to the platform's current
+  // one is only safe where that is itself a chain — on simulation it says
+  // nothing about where an older signature belongs, so no link is offered.
+  const chain = network ?? platformNetwork;
+  if (!chain || chain === 'simulation') {
+    return (
+      <span
+        className="font-mono text-xs text-ink-muted"
+        title="No network is recorded for this entry, so no explorer link can be built for it"
+      >
+        {truncateAddress(reference, 6)}
+      </span>
+    );
+  }
+
   return (
     <a
       className="font-mono text-xs text-accent-soft underline decoration-dotted underline-offset-2 transition-colors hover:text-ink"
-      href={solscanUrl('tx', reference, network ?? 'mainnet')}
+      href={solscanUrl('tx', reference, chain)}
       target="_blank"
       rel="noreferrer noopener"
       title={`View ${reference} on Solscan`}

@@ -33,6 +33,51 @@ const LAMPORTS_PER_SOL = 1_000_000_000;
 const EXPORT_PHRASE = 'I understand this reveals my private key';
 /** A balance older than this is stale enough that the operator should be told. */
 const STALE_BALANCE_MS = 10 * 60_000;
+/** The server caps /api/wallet transaction history at this many rows. */
+const TRANSACTION_LIMIT = 50;
+
+/**
+ * On the simulation network there is no chain behind any of this.
+ *
+ * The server hands a configured wallet a fixed synthetic float so that the
+ * spend guards are exercised end to end, and it refuses every transfer. A
+ * balance that was invented, and an address that exists nowhere, must never be
+ * rendered as though an explorer could confirm them.
+ */
+function isSimulated(network: string | null | undefined): boolean {
+  return (network ?? 'simulation') === 'simulation';
+}
+
+/** An address or signature link, suppressed when there is no chain to link to. */
+function ExplorerLink({
+  kind,
+  value,
+  network,
+  className,
+  children,
+}: {
+  kind: 'account' | 'tx';
+  value: string;
+  network: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  if (isSimulated(network)) {
+    return (
+      <span
+        className={`${className ?? ''} text-ink-subtle`.trim()}
+        title="Simulated — this does not exist on any chain, so there is no explorer page for it"
+      >
+        {children} <span className="text-xs">(not on chain)</span>
+      </span>
+    );
+  }
+  return (
+    <a className={className} href={solscanUrl(kind, value, network)} target="_blank" rel="noreferrer noopener">
+      {children}
+    </a>
+  );
+}
 
 interface WalletSummary {
   address?: string | null;
@@ -142,6 +187,7 @@ export function WalletPage() {
   const custody = summary?.custody ?? 'unknown';
   const canSign = summary?.canSign === true;
   const watchOnly = custody === 'watch_only';
+  const simulated = isSimulated(summary?.network);
 
   const canConfigure = can('edit_wallet_config');
   const canTransfer = can('transfer_funds');
@@ -190,6 +236,23 @@ export function WalletPage() {
         <Note tone="negative">
           <strong>Balance refresh failed.</strong>{' '}
           {refresh.error instanceof Error ? refresh.error.message : 'The RPC endpoint did not answer.'}
+        </Note>
+      )}
+
+      {/*
+        The single most dangerous misreading available on this page: a balance
+        that was invented by the server, shown next to a real-looking address.
+      */}
+      {simulated && (
+        <Note tone="warning">
+          <span aria-hidden="true">◇</span> <strong>This platform is running on the simulation network.</strong> There
+          is no chain behind anything on this page.{' '}
+          {address
+            ? 'The balance below is not a measurement: the server assigns a configured wallet a fixed synthetic float so the spending limits and the launch pipeline can be exercised end to end. No SOL exists, the address holds nothing, and transfers and sweeps are refused outright.'
+            : 'No wallet is configured, so nothing is being simulated yet. Any wallet created here will be given a synthetic balance rather than a real one.'}{' '}
+          Nothing here can be confirmed in an explorer, so the explorer links are withheld rather than pointed at a
+          mainnet page that would show a different account or nothing at all. Switch the network in Settings to operate
+          for real.
         </Note>
       )}
 
@@ -322,7 +385,9 @@ function CustodyDiagram({
               <div className="tnum text-lg font-semibold text-ink">
                 {hasWallet ? formatSol(operatingSol) : '—'}
               </div>
-              <div className="text-xs text-ink-subtle">{hasWallet ? 'balance' : 'no wallet yet'}</div>
+              <div className="text-xs text-ink-subtle">
+                {!hasWallet ? 'no wallet yet' : isSimulated(network) ? 'simulated balance' : 'balance'}
+              </div>
             </div>
           </div>
         </div>
@@ -366,7 +431,11 @@ function OperatingWalletCard({
   const canSign = summary?.canSign === true;
   const custody = summary?.custody ?? 'unknown';
   const checkedAt = maybeNum(summary?.balanceCheckedAt);
-  const stale = checkedAt === null || Date.now() - checkedAt > STALE_BALANCE_MS;
+  const simulated = isSimulated(network);
+  // A synthetic balance cannot go stale against a chain that is not there, so
+  // the staleness warning would be noise — the simulation banner already says
+  // the figure is invented.
+  const stale = !simulated && (checkedAt === null || Date.now() - checkedAt > STALE_BALANCE_MS);
 
   // The bar reads as "how far above the floor am I", capped at twice the floor
   // so that a healthy wallet does not render as a permanently full bar.
@@ -389,7 +458,7 @@ function OperatingWalletCard({
           {address || 'no address'}
         </code>
         {address && <CopyButton value={address} label="Copy address" />}
-        {address && (
+        {address && !isSimulated(network) && (
           <a
             className="text-xs text-ink-subtle transition-colors hover:text-accent-soft"
             href={solscanUrl('account', address, network)}
@@ -399,23 +468,34 @@ function OperatingWalletCard({
             Solscan ↗
           </a>
         )}
+        {address && isSimulated(network) && (
+          <span className="text-xs text-ink-subtle" title="Simulated — this address exists on no chain">
+            No explorer page
+          </span>
+        )}
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <StatTile
-          label="Balance"
+          label={simulated ? 'Balance (simulated)' : 'Balance'}
           value={formatSol(balance)}
-          tone={belowFloor ? 'negative' : 'neutral'}
+          tone={simulated ? 'warning' : belowFloor ? 'negative' : 'neutral'}
           hint={
-            checkedAt === null
-              ? 'Never checked against the chain'
-              : `Checked ${formatRelative(checkedAt)}`
+            simulated
+              ? 'Synthetic float assigned by the server — no SOL exists'
+              : checkedAt === null
+                ? 'Never checked against the chain'
+                : `Checked ${formatRelative(checkedAt)}`
           }
         />
         <StatTile
           label="Available to spend"
           value={formatSol(available)}
-          hint="Balance minus the floor the platform refuses to spend below"
+          hint={
+            simulated
+              ? 'Balance minus the floor — derived from the simulated balance'
+              : 'Balance minus the floor the platform refuses to spend below'
+          }
         />
         <StatTile label="Balance floor" value={formatSol(floor)} hint="Spending halts at or below this" />
       </div>
@@ -495,14 +575,20 @@ function TreasuryCard({
             </code>
             <div className="mt-1.5 flex items-center gap-3">
               <CopyButton value={treasuryAddress} label="Copy" />
-              <a
-                className="text-xs text-ink-subtle transition-colors hover:text-accent-soft"
-                href={solscanUrl('account', treasuryAddress, network)}
-                target="_blank"
-                rel="noreferrer noopener"
-              >
-                Solscan ↗
-              </a>
+              {isSimulated(network) ? (
+                <span className="text-xs text-ink-subtle" title="Simulated — no chain to look this up on">
+                  No explorer page
+                </span>
+              ) : (
+                <a
+                  className="text-xs text-ink-subtle transition-colors hover:text-accent-soft"
+                  href={solscanUrl('account', treasuryAddress, network)}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  Solscan ↗
+                </a>
+              )}
             </div>
           </div>
 
@@ -521,7 +607,12 @@ function TreasuryCard({
             {sweep?.reason ?? 'The API returned no sweep evaluation.'}
           </Note>
 
-          {canTransfer ? (
+          {isSimulated(network) ? (
+            <Note tone="warning">
+              <span aria-hidden="true">◇</span> Sweeping is unavailable on the simulation network: a sweep is a
+              transfer, and there are no real funds to move.
+            </Note>
+          ) : canTransfer ? (
             <button
               className="btn btn-ghost w-full"
               onClick={() => setConfirming(true)}
@@ -823,6 +914,24 @@ function TransferPanel({
   const available = maybeNum(summary?.availableForSpendSol);
   const exceedsBalance = amountValid && balance !== null && parsedAmount > balance;
   const exceedsAvailable = amountValid && !exceedsBalance && available !== null && parsedAmount > available;
+  const simulated = isSimulated(network);
+
+  // The server refuses every transfer on the simulation network. Offering a
+  // working-looking form that can only ever fail is worse than saying so.
+  if (simulated) {
+    return (
+      <Card>
+        <SectionHeader title="Send SOL" />
+        <div className="mt-3">
+          <Note tone="warning">
+            <span aria-hidden="true">◇</span> <strong>Transfers are unavailable on the simulation network.</strong>{' '}
+            There are no real funds to move, and the server rejects the request rather than pretending to send
+            something. Switch the network in Settings to enable this.
+          </Note>
+        </div>
+      </Card>
+    );
+  }
 
   if (!canTransfer) {
     return (
@@ -1001,20 +1110,27 @@ function AccountsCard({ accounts, network }: { accounts: AccountRow[]; network: 
                     <Td>{account.label ?? '—'}</Td>
                     <Td>
                       {rowAddress ? (
-                        <a
+                        <ExplorerLink
+                          kind="account"
+                          value={rowAddress}
+                          network={rowNetwork}
                           className="font-mono text-xs text-accent-soft hover:underline"
-                          href={solscanUrl('account', rowAddress, rowNetwork)}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          title={rowAddress}
                         >
                           {truncateAddress(rowAddress, 6)}
-                        </a>
+                        </ExplorerLink>
                       ) : (
                         '—'
                       )}
                     </Td>
-                    <Td>{humanise(rowNetwork)}</Td>
+                    <Td>
+                      {isSimulated(rowNetwork) ? (
+                        <Badge tone="warning">
+                          <span aria-hidden="true">◇</span> Simulation
+                        </Badge>
+                      ) : (
+                        humanise(rowNetwork)
+                      )}
+                    </Td>
                     <Td>
                       <Badge tone={account.custody === 'watch_only' ? 'warning' : 'accent'}>{humanise(account.custody ?? null)}</Badge>
                     </Td>
@@ -1025,8 +1141,15 @@ function AccountsCard({ accounts, network }: { accounts: AccountRow[]; network: 
                         <span className="text-ink-subtle">✕ no</span>
                       )}
                     </Td>
+                    {/* Never checked is not the same as empty: a zero here would be a lie. */}
                     <Td align="right" className="tnum">
-                      {formatSol(toSol(account.balance_lamports))}
+                      {maybeNum(account.balance_checked_at) === null ? (
+                        <span className="text-ink-subtle" title="This balance has never been read, so no figure is shown">
+                          —
+                        </span>
+                      ) : (
+                        formatSol(toSol(account.balance_lamports))
+                      )}
                     </Td>
                     <Td align="right" className="text-ink-subtle">
                       <span title={formatDateTime(maybeNum(account.balance_checked_at))}>
@@ -1045,12 +1168,27 @@ function AccountsCard({ accounts, network }: { accounts: AccountRow[]; network: 
 }
 
 function TransactionsCard({ transactions, network }: { transactions: TransactionRow[]; network: string }) {
+  // The API returns at most this many rows, so "every transfer" would be a
+  // claim the data cannot support once the wallet has been busy.
+  const truncated = transactions.length >= TRANSACTION_LIMIT;
   return (
     <Card>
       <SectionHeader
         title="Transaction history"
-        description="Every transfer this platform has signed or attempted, newest first."
+        description={
+          transactions.length === 0
+            ? 'Every transfer this platform has signed or attempted, newest first.'
+            : `The ${transactions.length} most recent transfers this platform signed or attempted, newest first — including the ones that failed.`
+        }
       />
+      {truncated && (
+        <div className="mt-3">
+          <Note>
+            Only the most recent {TRANSACTION_LIMIT} transfers are returned by the API. Older ones exist and are not
+            listed here, so do not read this table as a complete ledger.
+          </Note>
+        </div>
+      )}
       <div className="mt-3">
         {transactions.length === 0 ? (
           <EmptyState
@@ -1082,7 +1220,12 @@ function TransactionsCard({ transactions, network }: { transactions: Transaction
                     <Td>
                       <span title={formatDateTime(maybeNum(tx.occurred_at))}>{formatRelative(maybeNum(tx.occurred_at))}</span>
                     </Td>
-                    <Td className="text-ink">{humanise(tx.purpose ?? null)}</Td>
+                    <Td className="text-ink">
+                      {humanise(tx.purpose ?? null)}
+                      {tx.initiated_by && (
+                        <div className="text-xs text-ink-subtle">by {tx.initiated_by}</div>
+                      )}
+                    </Td>
                     <Td>
                       <span className={outbound ? 'text-negative' : 'text-positive'}>
                         {outbound ? '↑ out' : '↓ in'}
@@ -1097,15 +1240,14 @@ function TransactionsCard({ transactions, network }: { transactions: Transaction
                     </Td>
                     <Td>
                       {tx.counterparty ? (
-                        <a
+                        <ExplorerLink
+                          kind="account"
+                          value={tx.counterparty}
+                          network={rowNetwork}
                           className="font-mono text-xs text-accent-soft hover:underline"
-                          href={solscanUrl('account', tx.counterparty, rowNetwork)}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          title={tx.counterparty}
                         >
                           {truncateAddress(tx.counterparty, 5)}
-                        </a>
+                        </ExplorerLink>
                       ) : (
                         <span className="text-ink-subtle">—</span>
                       )}
@@ -1116,14 +1258,14 @@ function TransactionsCard({ transactions, network }: { transactions: Transaction
                     </Td>
                     <Td>
                       {tx.signature ? (
-                        <a
+                        <ExplorerLink
+                          kind="tx"
+                          value={tx.signature}
+                          network={rowNetwork}
                           className="text-accent-soft hover:underline"
-                          href={solscanUrl('tx', tx.signature, rowNetwork)}
-                          target="_blank"
-                          rel="noreferrer noopener"
                         >
                           {truncateAddress(tx.signature, 5)}
-                        </a>
+                        </ExplorerLink>
                       ) : (
                         <span className="text-ink-subtle" title="Never reached the chain">—</span>
                       )}

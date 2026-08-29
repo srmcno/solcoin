@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Badge,
@@ -60,7 +60,6 @@ interface HealthComponent {
   requiresCredentials?: boolean | null;
   setupHint?: string | null;
   quotaRemaining?: number | null;
-  quotaResetAt?: number | null;
   metrics?: Record<string, unknown> | null;
   availability?: Availability | null;
   checkedAt?: number | null;
@@ -308,7 +307,7 @@ export function HealthPage() {
           tone={counts.attention > 0 ? 'warning' : 'neutral'}
           hint={
             counts.unconfigured > 0
-              ? `${counts.unconfigured} not set up yet — normal on a new install`
+              ? `Of the ${counts.total} registered, ${counts.unconfigured} are not set up yet — normal on a new install, and not counted as faults`
               : 'Every registered component reported in'
           }
         />
@@ -462,6 +461,14 @@ function ComponentCard({ component }: { component: HealthComponent }) {
   const providerKind = str(componentMetric(component, 'providerKind'));
   const setupHint = str(component.setupHint);
   const availability = component.availability ?? null;
+  // The health service folds a provider's setup hint into `detail` for the
+  // unconfigured state, so `setupHint` usually arrives empty. Rather than
+  // inventing a sentence to fill the gap, the block below says only what the
+  // server actually reported — and `requiresCredentials` decides where the
+  // operator is sent, because a source that needs no key is idle for a
+  // configuration reason, not a missing credential.
+  const requires = componentMetric(component, 'requiresCredentials');
+  const needsCredential = requires === true ? true : requires === false ? false : null;
 
   return (
     <div className="rounded-xl border border-border bg-surface-raised p-3.5">
@@ -484,11 +491,15 @@ function ComponentCard({ component }: { component: HealthComponent }) {
       {state === 'unconfigured' && (
         <div className="mt-2.5 rounded-lg border border-border bg-surface px-2.5 py-2">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-subtle">To enable this</div>
-          <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-            {setupHint || 'Add the credential this provider needs, then it will come online automatically.'}
-          </p>
+          {setupHint ? (
+            <p className="mt-1 text-xs leading-relaxed text-ink-muted">{setupHint}</p>
+          ) : needsCredential === false ? (
+            <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+              This one needs no credential. It is idle because of how it is configured, not because a key is missing.
+            </p>
+          ) : null}
           <Link className="mt-1.5 inline-block text-xs text-accent-soft underline underline-offset-2" to="/settings">
-            Open Providers &amp; secrets →
+            {needsCredential === false ? 'Open Settings →' : 'Open Providers & secrets →'}
           </Link>
         </div>
       )}
@@ -573,6 +584,12 @@ function AvailabilityBlock({ availability }: { availability: Availability }) {
           </div>
         )}
       </dl>
+      {observed !== null && lower !== null && upper !== null && (
+        <p className="mt-1.5 text-[11px] leading-relaxed text-ink-subtle">
+          The interval bounds the raw rate, not the shrunk estimate above it. On a thin sample the estimate sits outside
+          the interval — that is the shrinkage working, not an inconsistency.
+        </p>
+      )}
       {str(availability.caveat) && (
         <p className="mt-2 text-[11px] leading-relaxed text-warning">{str(availability.caveat)}</p>
       )}
@@ -850,6 +867,12 @@ function AuditPanel({ canView }: { canView: boolean }) {
 
   const entries = query.data?.entries ?? [];
   const verification = verify.data;
+  // The server walks the chain under a row limit, so a clean walk is not by
+  // itself proof that the whole log is intact. Comparing what was checked
+  // against the recorded total is what makes the claim below honest.
+  const total = maybeNum(query.data?.total);
+  const checked = maybeNum(verification?.checked);
+  const uncheckedRemainder = total !== null && checked !== null && total > checked ? total - checked : null;
 
   return (
     <div className="space-y-4">
@@ -873,16 +896,20 @@ function AuditPanel({ canView }: { canView: boolean }) {
             </Note>
           ) : verification.valid === true ? (
             <Note tone="positive">
-              <strong className="font-semibold">Chain intact.</strong> {formatNumber(maybeNum(verification.checked))}{' '}
-              entries were re-hashed and every one matched the record that follows it. Nothing has been altered or
-              removed.
+              <strong className="font-semibold">Chain intact.</strong> {formatNumber(checked)} entries were re-hashed and
+              every one matched the record that follows it.{' '}
+              {uncheckedRemainder !== null
+                ? `The walk stops at a row limit, so ${formatNumber(uncheckedRemainder)} of the ${formatNumber(total)} recorded entries were not covered by this check — treat the result as "no tampering found in the part that was walked", not as a clean bill for the whole log.`
+                : total !== null
+                  ? `That is every one of the ${formatNumber(total)} entries on record: nothing has been altered or removed.`
+                  : 'Nothing in the walked range has been altered or removed.'}
             </Note>
           ) : (
             <Note tone="negative">
               <strong className="font-semibold">Chain broken at sequence {formatNumber(maybeNum(verification.brokenAtSequence))}.</strong>{' '}
-              {str(verification.detail) || 'The recomputed hash did not match the stored one.'} Entries up to sequence{' '}
-              {formatNumber(maybeNum(verification.checked))} verified cleanly; everything from the break onward should be
-              treated as untrustworthy.
+              {str(verification.detail) || 'The recomputed hash did not match the stored one.'} The first{' '}
+              {formatNumber(checked)} entries verified cleanly; everything from the break onward should be treated as
+              untrustworthy.
             </Note>
           )}
         </div>
@@ -988,30 +1015,44 @@ function LogsPanel() {
   const [level, setLevel] = useState<string>('');
   const [component, setComponent] = useState<string>('');
 
+  // Both filters are applied server-side. Filtering the fetched window in the
+  // browser instead would silently hide older events from a quiet component,
+  // and a filter that quietly lies about what exists is worse than no filter.
   const query = useApiQuery<{ events?: LogRow[] }>(
-    [...queryKeys.logs({ level }), level || 'all', LOG_LIMIT],
-    `/api/system/logs?limit=${LOG_LIMIT}${level ? `&level=${encodeURIComponent(level)}` : ''}`,
+    queryKeys.logs({ level: level || 'all', component: component || 'all', limit: LOG_LIMIT }),
+    `/api/system/logs?limit=${LOG_LIMIT}${level ? `&level=${encodeURIComponent(level)}` : ''}${
+      component ? `&component=${encodeURIComponent(component)}` : ''
+    }`,
     { refetchInterval: POLL.normal },
   );
 
   const events = useMemo(() => query.data?.events ?? [], [query.data]);
 
-  // The component filter is applied over the fetched window rather than
-  // server-side, so the dropdown can offer every component actually present in
-  // that window instead of only the one already selected.
-  const componentOptions = useMemo(() => {
-    const seen = new Set<string>();
-    for (const event of events) {
-      const id = str(event.component);
-      if (id) seen.add(id);
-    }
-    return [...seen].sort();
+  // Options accumulate across responses. Once a component filter is applied the
+  // response contains only that component, and a select that empties itself the
+  // moment you use it is unusable.
+  const [knownComponents, setKnownComponents] = useState<string[]>([]);
+  useEffect(() => {
+    setKnownComponents((current) => {
+      const merged = new Set(current);
+      let added = false;
+      for (const event of events) {
+        const id = str(event.component);
+        if (id && !merged.has(id)) {
+          merged.add(id);
+          added = true;
+        }
+      }
+      return added ? [...merged].sort() : current;
+    });
   }, [events]);
 
-  const visible = useMemo(
-    () => (component ? events.filter((e) => str(e.component) === component) : events),
-    [events, component],
-  );
+  const filtered = level !== '' || component !== '';
+  const truncated = events.length >= LOG_LIMIT;
+  const clearFilters = () => {
+    setLevel('');
+    setComponent('');
+  };
 
   return (
     <Card padded={false}>
@@ -1040,30 +1081,32 @@ function LogsPanel() {
             </label>
             <select id="log-component" className="input" value={component} onChange={(e) => setComponent(e.target.value)}>
               <option value="">All components</option>
-              {componentOptions.map((option) => (
+              {knownComponents.map((option) => (
                 <option key={option} value={option}>
                   {option}
                 </option>
               ))}
-              {component && !componentOptions.includes(component) && <option value={component}>{component}</option>}
+              {component && !knownComponents.includes(component) && <option value={component}>{component}</option>}
             </select>
+            <p className="mt-1 text-[11px] leading-relaxed text-ink-subtle">
+              Lists the components seen so far in this session, so a component that has been silent throughout may be
+              missing from it.
+            </p>
           </div>
-          {(level || component) && (
-            <button
-              className="btn btn-ghost"
-              onClick={() => {
-                setLevel('');
-                setComponent('');
-              }}
-            >
+          {filtered && (
+            <button className="btn btn-ghost" onClick={clearFilters}>
               Clear filters
             </button>
           )}
         </div>
         <Note tone="neutral">
-          Showing {formatNumber(visible.length)} of the {formatNumber(events.length)} most recent events
-          {level ? ` at level ${level}` : ''}. The component filter applies within this window, so an older event from a
-          quiet component may not appear.
+          Showing the {formatNumber(events.length)} most recent event{events.length === 1 ? '' : 's'}
+          {filtered ? ' matching these filters' : ''}
+          {truncated
+            ? `. That is the whole ${formatNumber(LOG_LIMIT)}-row window this page requests, so older matching events exist and are not shown — narrow the filters to reach them.`
+            : filtered
+              ? '. That is every matching event the server holds.'
+              : '.'}
         </Note>
       </div>
 
@@ -1073,24 +1116,18 @@ function LogsPanel() {
         </div>
       ) : query.isError ? (
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
-      ) : visible.length === 0 ? (
+      ) : events.length === 0 ? (
         <EmptyState
-          title={events.length === 0 ? 'The log is empty' : 'No events match these filters'}
+          title={filtered ? 'No events match these filters' : 'The log is empty'}
           description={
-            events.length === 0
-              ? 'Nothing has been logged yet. The server writes an event whenever a job runs, a provider changes state or something fails — run a job from the Jobs tab to see the first entries.'
-              : 'Try a different level or component, or clear the filters to see everything in the window.'
+            filtered
+              ? 'The server holds no event at this level from this component. Try a different level or component, or clear the filters to see everything.'
+              : 'Nothing has been logged yet. The server writes an event whenever a job runs, a provider changes state or something fails — run a job from the Jobs tab to see the first entries.'
           }
           icon="▤"
           action={
-            events.length > 0 ? (
-              <button
-                className="btn btn-ghost"
-                onClick={() => {
-                  setLevel('');
-                  setComponent('');
-                }}
-              >
+            filtered ? (
+              <button className="btn btn-ghost" onClick={clearFilters}>
                 Clear filters
               </button>
             ) : undefined
@@ -1109,7 +1146,7 @@ function LogsPanel() {
             </tr>
           </thead>
           <tbody>
-            {visible.map((event, index) => {
+            {events.map((event, index) => {
               const eventLevel = str(event.level) || 'info';
               return (
                 <tr key={str(event.id) || index} className="align-top transition-colors hover:bg-surface-hover/40">
@@ -1267,8 +1304,10 @@ function DiagnosticsPanel() {
           <div className="mt-3">
             {chain.valid === true ? (
               <Note tone="positive">
-                Chain intact across the {formatNumber(maybeNum(chain.checked))} most recent entries checked by this
-                snapshot.
+                Chain intact across the {formatNumber(maybeNum(chain.checked))} entries this snapshot walked. The walk
+                starts at the first entry ever written and stops at a row limit, so it covers the oldest stretch of the
+                log rather than the newest — run <strong className="font-semibold">Verify chain</strong> on the Audit log
+                tab for the longer walk.
               </Note>
             ) : (
               <Note tone="negative">
