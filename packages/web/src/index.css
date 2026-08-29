@@ -1,0 +1,215 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * The palette is built around a near-black ground with a small number of
+ * deliberately-chosen accents. Financial dashboards fail when everything is
+ * emphasised, so colour is reserved for meaning: violet for the platform's own
+ * actions, emerald for realised revenue, amber for things needing attention,
+ * rose for failures, and slate for everything else.
+ */
+@theme {
+  --color-ground: #08080c;
+  --color-surface: #0e0e15;
+  --color-surface-raised: #14141d;
+  --color-surface-hover: #1a1a26;
+  --color-border: #23232f;
+  --color-border-strong: #33334a;
+
+  --color-ink: #f2f2f7;
+  --color-ink-muted: #a1a1b5;
+  --color-ink-subtle: #6c6c85;
+
+  --color-accent: #8b5cf6;
+  --color-accent-soft: #a78bfa;
+  --color-accent-dim: #4c1d95;
+
+  --color-positive: #34d399;
+  --color-positive-dim: #064e3b;
+  --color-warning: #fbbf24;
+  --color-warning-dim: #451a03;
+  --color-negative: #fb7185;
+  --color-negative-dim: #4c0519;
+  --color-info: #38bdf8;
+  --color-info-dim: #0c4a6e;
+
+  --font-sans: 'Inter var', 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    background: var(--color-ground);
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100dvh;
+  }
+
+  /* Numbers must align across rows or a table of figures is unreadable. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+  }
+
+  ::selection {
+    background: var(--color-accent-dim);
+    color: var(--color-ink);
+  }
+
+  /* A visible, high-contrast focus ring: keyboard users are not an afterthought. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent-soft);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border-radius: 6px;
+    border: 2px solid var(--color-ground);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-subtle);
+  }
+}
+
+@layer components {
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+  }
+
+  .card-raised {
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    border-radius: 9px;
+    font-weight: 550;
+    font-size: 0.875rem;
+    padding: 0.5rem 0.9rem;
+    transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--color-accent);
+    color: white;
+    border: 1px solid var(--color-accent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-soft);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--color-ink-muted);
+    border: 1px solid var(--color-border);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--color-surface-hover);
+    color: var(--color-ink);
+  }
+
+  .btn-danger {
+    background: transparent;
+    color: var(--color-negative);
+    border: 1px solid var(--color-negative-dim);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--color-negative-dim);
+    color: var(--color-ink);
+  }
+
+  .input {
+    width: 100%;
+    background: var(--color-ground);
+    border: 1px solid var(--color-border);
+    border-radius: 9px;
+    padding: 0.55rem 0.75rem;
+    color: var(--color-ink);
+    font-size: 0.875rem;
+  }
+  .input::placeholder {
+    color: var(--color-ink-subtle);
+  }
+  .input:focus {
+    border-color: var(--color-accent);
+    outline: none;
+  }
+
+  .label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 550;
+    color: var(--color-ink-muted);
+    margin-bottom: 0.35rem;
+    letter-spacing: 0.01em;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border-radius: 999px;
+    padding: 0.15rem 0.55rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

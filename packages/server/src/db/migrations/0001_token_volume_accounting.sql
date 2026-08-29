@@ -1,0 +1,1 @@
+ALTER TABLE `tokens` ADD `volume_accounted_at` integer;

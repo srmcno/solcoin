@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+*.log
+data/
+!data/.gitkeep
+coverage/
+.vite/
+.DS_Store
+*.tsbuildinfo
+.secrets/
+keystore/
+*.keystore.json
+tmp/
