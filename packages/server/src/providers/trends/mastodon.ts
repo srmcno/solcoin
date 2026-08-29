@@ -436,7 +436,7 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
     }
   }
 
-  function tagToSignal(tag: MergedTag, rank: number, observedAt: number): RawTrendSignal {
+  function tagToSignal(tag: MergedTag, rank: number | null, observedAt: number): RawTrendSignal {
     const points = toPoints(tag.byDay);
     const latest = points[points.length - 1];
     const displayName = sanitiseExternalText(tag.displayName, 120);
@@ -446,7 +446,6 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
       title: `#${displayName}`,
       rawValue: latest?.uses ?? 0,
       observedAt,
-      rank,
       history: points.map((p) => ({ t: p.t, v: p.uses })),
       keywords: hashtagKeywords(tag.displayName),
       metadata: {
@@ -458,6 +457,9 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
         weekAccounts: points.reduce((acc, p) => acc + p.accounts, 0),
       },
     };
+    // measure() has no ranked list to position the tag in, so rank stays unset
+    // rather than being faked as 0.
+    if (rank !== null) signal.rank = rank;
     if (tag.url) signal.url = tag.url;
     const engagement = computeEngagement(points);
     if (engagement !== undefined) signal.engagement = engagement;
@@ -708,7 +710,17 @@ export function createMastodonProvider(deps: MastodonProviderDeps = {}): TrendPr
 
       const tag = merged.get(tagName.toLowerCase()) ?? [...merged.values()][0];
       if (!tag) return null;
-      return tagToSignal(tag, 0, clock.now());
+
+      // Confirmed against live instances: `/api/v1/tags/{name}` answers 200 with
+      // a synthesised record — real id, real url, seven days of zeroes — for a
+      // tag nobody has ever posted. Returning that would hand downstream a
+      // fabricated "measured zero" indistinguishable from a genuine reading, so
+      // a tag with no recorded activity in the whole window is reported as
+      // absent instead.
+      const observed = toPoints(tag.byDay);
+      if (observed.reduce((acc, p) => acc + p.uses, 0) <= 0) return null;
+
+      return tagToSignal(tag, null, clock.now());
     },
   };
 }
