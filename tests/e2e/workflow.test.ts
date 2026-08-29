@@ -457,7 +457,39 @@ describe('access control', () => {
     const read = await app.inject({ method: 'GET', url: '/api/trends', headers: { cookie: viewerCookie } });
     expect(read.statusCode).toBe(200);
 
-    for (const url of ['/api/wallet/create', '/api/system/emergency-stop']) {
+    /*
+     * Every write route, not a sample of two.
+     *
+     * The permission audit that followed round six found the one route that
+     * mattered — a manual job run gated behind an analyst's permission while
+     * being able to launch a token — and two POSTs that let a `viewer` make the
+     * platform call an external API. A read-only role should be exactly that,
+     * so the list below is meant to stay exhaustive as routes are added.
+     */
+    for (const url of [
+      '/api/wallet/create',
+      '/api/wallet/import',
+      '/api/wallet/watch-only',
+      '/api/wallet/transfer',
+      '/api/wallet/sweep',
+      '/api/wallet/export',
+      '/api/wallet/refresh',
+      '/api/system/emergency-stop',
+      '/api/system/emergency-release',
+      '/api/system/clear-launch-failures',
+      '/api/trends/discover',
+      '/api/learning/train',
+      '/api/experiments',
+      '/api/jobs/launch-queue/run',
+      '/api/jobs/fee-collect/run',
+      '/api/jobs/trend-discovery/run',
+      '/api/fees/collect',
+      '/api/tokens/SomeMint1111111111111111111111111111111/refresh',
+      '/api/candidates/cpt_x/approve',
+      '/api/candidates/cpt_x/reject',
+      '/api/candidates/cpt_x/launch',
+      '/api/candidates/cpt_x/regenerate',
+    ]) {
       const write = await app.inject({
         method: 'POST',
         url,
@@ -465,6 +497,57 @@ describe('access control', () => {
         headers: { cookie: viewerCookie, 'x-csrf-token': viewerCsrf, 'content-type': 'application/json' },
       });
       expect(write.statusCode, `${url} must be forbidden for a viewer`).toBe(403);
+    }
+  });
+
+  it('does not let an analyst reach an operation their role withholds', async () => {
+    /*
+     * The case the viewer check above misses, and the one that was real.
+     *
+     * An analyst holds `run_research`, so every route gated behind it was open
+     * to them — including a manual run of `launch-queue`, which launches an
+     * approved candidate on mainnet, and `fee-collect`, which spends. The
+     * viewer test could never have caught it: a viewer lacks `run_research`
+     * too, so the old code refused them for the wrong reason.
+     */
+    const created = await post('/api/users', {
+      email: 'analyst@example.com',
+      password: 'a-third-long-passphrase',
+      displayName: 'Analyst',
+      role: 'analyst',
+    });
+    expect(created.statusCode).toBe(200);
+
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'analyst@example.com', password: 'a-third-long-passphrase' },
+    });
+    expect(login.statusCode).toBe(200);
+    const analystCsrf = login.json().csrfToken;
+    const setCookie = login.headers['set-cookie'];
+    const analystCookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie)?.split(';')[0] ?? '';
+
+    const headers = { cookie: analystCookie, 'x-csrf-token': analystCsrf, 'content-type': 'application/json' };
+
+    // What the role is for: research is theirs. Whether the job actually starts
+    // depends on the state earlier tests left behind; the point is that the
+    // permission check does not stand in the way.
+    const research = await app.inject({ method: 'POST', url: '/api/jobs/trend-discovery/run', headers });
+    expect(research.statusCode, 'research is what the analyst role is for').not.toBe(403);
+
+    for (const url of [
+      '/api/jobs/launch-queue/run',
+      '/api/jobs/launch-recovery/run',
+      '/api/jobs/fee-collect/run',
+      '/api/jobs/wallet-reconcile/run',
+      '/api/fees/collect',
+      '/api/wallet/transfer',
+      '/api/wallet/export',
+      '/api/system/emergency-stop',
+    ]) {
+      const write = await app.inject({ method: 'POST', url, payload: { reason: 'an analyst must not' }, headers });
+      expect(write.statusCode, `${url} must be forbidden for an analyst`).toBe(403);
     }
   });
 

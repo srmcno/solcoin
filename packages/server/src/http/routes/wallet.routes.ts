@@ -31,8 +31,10 @@ export default async function walletRoutes(
     return { summary, transactions, accounts, sweep, settings: container.settings.get().wallet };
   });
 
+  // Refreshing balances calls the RPC. Same reasoning as the token refresh: a
+  // read-only role should not be able to make the platform talk to anyone.
   app.post('/api/wallet/refresh', async (request) => {
-    requirePermission(request, 'view');
+    requirePermission(request, 'run_research');
     const balances = await container.wallet.refreshBalances();
     return {
       operatingSol: balances.operating !== null ? lamportsToSol(balances.operating) : null,

@@ -119,8 +119,10 @@ export default async function tokenRoutes(
     };
   });
 
+  // Polling a token spends market-provider quota. A `viewer` holds `view` and
+  // nothing else precisely so it cannot cause outbound work.
   app.post('/api/tokens/:mint/refresh', async (request) => {
-    requirePermission(request, 'view');
+    requirePermission(request, 'run_research');
     const { mint } = z.object({ mint: z.string() }).parse(request.params);
     const result = await container.refreshToken(mint);
     return result;
