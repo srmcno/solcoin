@@ -36,32 +36,34 @@ across the same ladder. Most tokens never get here.
 **On a non-canonical pool** — a Raydium migration, say — the creator share is
 **zero**. You earn nothing from those pools no matter how much they trade.
 
-> ### ⚠ The curve-fee revenue premise is not confirmed
+> ### The 0.30% is real, but only for a Creator Fee coin
 >
-> On 2026-08-30 an on-chain sample of live pump.fun trades found the 30 bps
-> "creator" leg of the bonding-curve fee being paid to
-> `PDA["user_volume_accumulator", trader]` — **the trader's account, not the
-> coin creator's vault**. Across six consecutive buys and sells against one
-> token, the creator vault's balance did not move at all; a trader was then
-> observed claiming 0.177 SOL out of their own accumulator.
+> Pump.fun introduced **Cashback Coins** on 2026-02-17. At creation, a coin is
+> either a *Creator Fee* coin or a *Cashback* coin, and **the choice is locked
+> permanently**. Under cashback, the entire 0.30% creator leg of every
+> bonding-curve trade is redirected to the traders' volume accumulators, and
+> the creator earns **nothing on the curve, ever**.
 >
-> If that is the current behaviour, the 0.30% bonding-curve figure is a trader
-> volume rebate and **curve-phase creator revenue is close to zero**, which
-> removes most of the basis for the arithmetic above.
+> This was verified on chain on 2026-08-30, both directions:
 >
-> **This is not established.** The sample was two tokens and roughly ten
-> transactions, it contradicts pump.fun's published fee documentation, and
-> pump.fun's own public docs repository is demonstrably out of date on fee
-> behaviour in other respects. It could be a misreading of the accounts
-> involved.
+> - On a Cashback Coin, across six consecutive buys and sells by four distinct
+>   traders, the creator vault received **0.00 bps** while the traders'
+>   accumulators received exactly 30.00 bps. Traders later withdrew it through
+>   an instruction named `ClaimCashbackV2`.
+> - On an ordinary Creator Fee coin, the creator vault received exactly
+>   **30.00 bps** from two independent buyers, with 95.00 bps to the protocol.
 >
-> What to do about it: **verify this yourself before funding anything on the
-> strength of curve fees.** Launch one token on mainnet, let it trade, and
-> watch whether your creator vault balance actually rises. That single
-> experiment costs under 0.01 SOL and settles the question that decides
-> whether this platform can earn anything at all. Post-graduation AMM creator
-> fees are a separate mechanism with a clearer on-chain basis — but most
-> tokens never graduate.
+> **This platform launches Creator Fee coins.** The launch adapter passes
+> `cashback: false` explicitly on every create instruction, and a test fails
+> the build if that argument is ever dropped. The SDK happens to default it to
+> false, but a default is not a guarantee — a dependency upgrade that flipped
+> it would silently make every future launch unable to earn, with nothing
+> failing and nothing visible in a diff.
+>
+> **Verify it anyway on your first mainnet launch.** Watch your creator vault —
+> `PDA["creator-vault", <your address>]` — and confirm the balance actually
+> rises after somebody trades. It costs nothing to check and it is the single
+> assumption the whole business model rests on.
 
 **These figures are protocol state, not constants, and the platform does not
 re-read them.** They are a snapshot in
@@ -107,7 +109,8 @@ At the shipped default limits — 3 launches a day — you are spending roughly
 **0.026 SOL a day, about 0.77 SOL a month**, before any API costs. To break
 even on-chain your tokens must collectively trade around **255 SOL a month**.
 
-All of which assumes the next section is wrong.
+These figures assume a Creator Fee coin, which is what this platform launches —
+see the box above.
 
 ### The part that decides everything
 

@@ -135,3 +135,56 @@ describe('launch cost estimation', () => {
     expect(estimatedLaunchCostLamports(-1)).toBe(estimatedLaunchCostLamports(0));
   });
 });
+
+describe('coins are launched in creator-fee mode', () => {
+  /**
+   * Pump.fun's Cashback Coins redirect the entire 0.30% creator leg of every
+   * bonding-curve trade to traders instead of the creator vault, and the mode
+   * is fixed at creation and locked permanently. A coin launched in cashback
+   * mode earns its creator nothing on the curve, ever.
+   *
+   * The SDK defaults `cashback` to false, so omitting it works today. This
+   * guards against it being dropped again, or against a dependency upgrade
+   * flipping that default — either of which would silently make every future
+   * launch unable to earn, with nothing failing and nothing visible in a diff.
+   *
+   * A source assertion, deliberately: the behaviour it protects can only be
+   * observed on mainnet, and the realistic failure is the argument going away
+   * during a refactor rather than the protocol changing under us.
+   */
+  it('passes cashback: false to every create instruction', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const source = readFileSync(
+      resolve(process.cwd(), 'packages/server/src/providers/solana/pumpfun-adapter.ts'),
+      'utf8',
+    );
+
+    // Each create call's argument object, delimited by brace matching rather
+    // than a regex — a non-greedy pattern stops at the first `})` and silently
+    // matches a fragment, which is how the first version of this test passed
+    // while an argument was missing.
+    const calls: string[] = [];
+    const opener = /createV2(?:AndBuy)?Instructions?\(\{/g;
+    for (let m = opener.exec(source); m !== null; m = opener.exec(source)) {
+      let depth = 1;
+      let i = m.index + m[0].length;
+      while (i < source.length && depth > 0) {
+        if (source[i] === '{') depth++;
+        else if (source[i] === '}') depth--;
+        i++;
+      }
+      calls.push(source.slice(m.index, i));
+    }
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      // Comments stripped first. The block comment beside the argument quotes
+      // `cashback: false` verbatim, so matching the raw text passed even with
+      // the argument deleted — which is exactly the failure this test exists
+      // to catch, and it did not catch it until the comment was excluded.
+      const code = call.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      expect(code, 'a create call is missing an explicit cashback: false').toMatch(/\bcashback:\s*false\b/);
+    }
+  });
+});
