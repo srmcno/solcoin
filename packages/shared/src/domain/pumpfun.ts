@@ -2,11 +2,23 @@
  * Pump.fun protocol constants and the creator-fee economic model.
  *
  * IMPORTANT: fee parameters are protocol state, not constants. The authoritative
- * source is the on-chain `FeeConfig` account owned by the Pump Fees program, and
- * the server reads it at runtime (see `providers/solana/fee-config.ts`). The
- * values here are the last verified snapshot and serve two purposes:
- *   1. a fallback when no RPC is reachable, always labelled as an estimate; and
- *   2. the reference used by simulation and backtests, so results are reproducible.
+ * source is the on-chain `FeeConfig` account owned by the Pump Fees program.
+ *
+ * These values are a verified snapshot of it, and they are what the platform
+ * actually uses for every economic estimate: the opportunity model, the
+ * prediction bundle, and the fee projections shown on the dashboard all read
+ * the constants below rather than the chain.
+ *
+ * The one place a live read happens is `PumpFunLaunchAdapter.prepare`, which
+ * calls the SDK's `fetchFeeConfig()` to price a developer buy against the
+ * curve's opening price — because devnet and mainnet differ there and a
+ * hardcoded figure would misprice the buy.
+ *
+ * The consequence, stated so it is not discovered the expensive way: if
+ * Pump.fun changes its fee schedule, the platform's revenue estimates go stale
+ * silently. `creatorBpsFromTiers` and `LiveFeeConfig` below exist to consume a
+ * live read and are deliberately left in place for that work, but nothing calls
+ * them yet.
  *
  * Snapshot verified: 2026-08-29, by decoding the live FeeConfig accounts.
  */

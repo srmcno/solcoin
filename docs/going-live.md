@@ -34,10 +34,18 @@ never get here.
 **On a non-canonical pool** — a Raydium migration, say — the creator share is
 **zero**. You earn nothing from those pools no matter how much they trade.
 
-These figures are protocol state, not constants. The platform reads the live
-`FeeConfig` accounts at runtime and treats the values compiled into
-`packages/shared/src/domain/pumpfun.ts` only as a labelled fallback. That
-snapshot was verified on 2026-08-29 by decoding the on-chain accounts.
+**These figures are protocol state, not constants, and the platform does not
+re-read them.** They are a snapshot in
+`packages/shared/src/domain/pumpfun.ts`, verified on 2026-08-29 by decoding
+the on-chain `FeeConfig` accounts, and every economic estimate the platform
+makes — the opportunity model, the predictions, the fee projections on the
+dashboard — uses that snapshot. Only the developer-buy pricing path reads fee
+config live from chain.
+
+So if Pump.fun changes its fee schedule, the platform's revenue estimates go
+stale without saying so. Check the current rates yourself before you scale up
+spending, and treat a large divergence between projected and actual fee income
+as a reason to go and look.
 
 ### What it costs
 
