@@ -146,11 +146,35 @@ export const PRIOR_LIFESPAN_LOG: Record<string, number> = {
  * system that starts from an optimistic prior will over-launch before it has
  * evidence. They are replaced by observed rates once enough launches exist.
  */
+/**
+ * Untrained base rates, used until the model has scored real outcomes.
+ *
+ * `graduation` is measured, not estimated: 0.198% pooled across 832,941
+ * launches observed 2026-05-08 to 2026-06-10, Wilson 95% interval
+ * 0.189-0.208%, from the survival analysis published as arXiv:2607.02823.
+ * Its authors note that figure is a lower bound on the true 24-hour rate.
+ *
+ * It was 0.012 here — six times too high, and optimistic in the direction
+ * that costs money. A graduation prior inflates every revenue projection the
+ * platform makes, and it does so for exactly as long as the model has no real
+ * outcomes to learn from, which is the whole first phase of operation.
+ *
+ * The tempting argument against using the market rate is that this platform
+ * selects candidates through a quality gate, so its launches should graduate
+ * more often than a random one. That may turn out to be true. Assuming it
+ * before measuring it is assuming the conclusion: any lift from selection has
+ * to be *learned* from scored outcomes, not written into the prior it will be
+ * measured against.
+ *
+ * The other three rates are left as they were. There is no comparably rigorous
+ * public figure for them, and replacing one sourced number while leaving
+ * unsourced ones beside it is not an improvement worth pretending to.
+ */
 export const BASE_RATES = {
   firstBuy: 0.42,
   tenHolders: 0.16,
   hundredHolders: 0.035,
-  graduation: 0.012,
+  graduation: 0.00198,
 } as const;
 
 /** Bias terms chosen so a perfectly average candidate predicts the base rate. */
