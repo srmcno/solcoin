@@ -117,12 +117,46 @@ see the box above.
 None of the above is the hard question. The hard question is what fraction of
 launched tokens trade *anything at all*.
 
-The honest answer is that the distribution is brutally skewed: the large
-majority of tokens launched on this kind of venue attract essentially no
-volume and earn their creator essentially nothing, while a very small minority
-carries whatever return exists. This platform's own simulation encodes that
-shape deliberately — its outcome model is not flattering, because a simulation
-that made every launch look promising would teach the model the wrong thing.
+Public figures, checked 2026-08-30:
+
+| | |
+| --- | --- |
+| Tokens that graduate the bonding curve | **~1.15%** of launches at its best in early 2026, having collapsed to **~0.26%** in mid-June 2026; historically "fewer than 2%" |
+| Graduation threshold | roughly **85 SOL** of curve purchases |
+| Of those that *do* graduate | "very few trade for more than a month, and many end their trading arc within a day" |
+| Ever exceeded $10M market cap | **18 tokens**, across the platform's entire history |
+
+Now put that against the arithmetic. Take 100 launches:
+
+- They cost **0.85 SOL** to create.
+- About **one** graduates. Graduating means ≥85 SOL of curve volume, so that
+  token alone returns **≥0.255 SOL** in creator fees, plus whatever the AMM
+  tier pays afterwards. Roughly 30× its own launch cost.
+- Which still leaves about **0.6 SOL** to be earned by the other 99 — around
+  **200 SOL of combined volume**, or **~2 SOL each**.
+
+So the whole question is whether a typical non-graduating token trades about
+two SOL. Nobody publishes that number. It is the one figure that decides
+whether this operation makes money, and it cannot be looked up — which is
+precisely why the first months are for *measuring* it rather than earning
+from it.
+
+What follows:
+
+- **Expected value is dominated by the tail.** Reasoning from a median outcome
+  misleads in one direction; reasoning from a good one misleads much further
+  in the other.
+- **Small samples tell you nothing.** Ten launches cannot distinguish a good
+  selection process from a lucky one — at a 1% graduation rate, ten launches
+  most likely contain zero graduations whether your selection is excellent or
+  worthless.
+- **The realistic goal of the first months is not profit.** It is a dataset:
+  enough scored predictions to know whether the selection process beats
+  chance. Until then you are paying for information.
+
+This platform's own simulation encodes that shape deliberately — its outcome
+model is not flattering, because a simulation that made every launch look
+promising would teach the model the wrong thing.
 
 What follows from that:
 
@@ -140,6 +174,13 @@ What follows from that:
 Decide now what you are willing to spend to find that out, set
 `limits.maxSolSpendPerDay` to that number divided by thirty, and let the caps
 enforce it rather than your judgement at 2am.
+
+Sources for the figures above:
+[The Block's daily graduated-token metric](https://www.theblock.co/data/on-chain-metrics/solana/pump-fun-percent-graduated-tokens-daily/embed),
+[Cryptopolitan on the 1.15% peak](https://www.cryptopolitan.com/pump-fun-graduating-tokens-break-to-1-15-of-new-launches/),
+[DEXTools on the June 2026 collapse](https://www.dextools.io/news/pump-fun-graduation-collapse-solana-fees-2026),
+[Solana Compass on the sub-2% rate](https://solanacompass.com/news/pumpfun-launched-42000-tokens-in-one-day-fewer-than-2-will-ever-reach-a-dex),
+and [pump.fun's own bonding-curve documentation](https://pump.fun/docs/bonding-curve).
 
 > This is an engineering document, not financial advice. Creating and
 > distributing tokens has tax and regulatory consequences that differ by
