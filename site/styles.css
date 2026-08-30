@@ -62,7 +62,6 @@ body {
   line-height: 1.65;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  overflow-x: hidden;
 }
 
 a { color: var(--accent-text); text-decoration-thickness: 1px; text-underline-offset: 2px; }
@@ -158,8 +157,29 @@ nav.site a {
 nav.site a:hover { color: var(--text); }
 nav.site a.repo { color: var(--text); font-weight: 550; }
 
+/*
+ * The header must fit the narrowest phone, not merely appear to.
+ *
+ * `overflow-x: hidden` on the body was doing the appearing: below about 360px
+ * the brand, three nav links, their gaps and the page padding are wider than
+ * the viewport, and hiding the overflow clipped the rightmost link — the one
+ * going to the source — rather than making it reachable. It also made a
+ * scrollWidth check meaningless, so the page measured clean while being
+ * broken. The links are dropped in order of how much they cost to lose.
+ */
 @media (max-width: 46rem) {
   nav.site a.hide-sm { display: none; }
+}
+
+@media (max-width: 26rem) {
+  header.site .wrap { gap: 0.75rem; }
+  nav.site { gap: 0.85rem; }
+  nav.site a.hide-xs { display: none; }
+}
+
+@media (max-width: 20rem) {
+  .brand { font-size: 0.9375rem; }
+  nav.site a { font-size: 0.8125rem; }
 }
 
 /* ---------- hero ------------------------------------------------------ */

@@ -87,7 +87,22 @@ export function loadEnv(options: { cwd?: string; reload?: boolean } = {}): Env {
   const cwd = options.cwd ?? process.cwd();
   loadDotEnv(resolve(cwd, '.env'));
 
-  const parsed = EnvSchema.safeParse(process.env);
+  /*
+   * An empty environment variable means "not set", not "set to the empty string".
+   *
+   * A `.env` file has no way to express absence except by omitting the line, and
+   * the shipped `.env.example` lists every optional variable with an empty value
+   * so an operator can see what exists. Handing those straight to the schema
+   * made `cp .env.example .env` — the documented first step — produce a server
+   * that refused to boot, complaining that an address it was never given is not
+   * a valid email. Optional means optional.
+   */
+  const present: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string' && value.trim() !== '') present[key] = value;
+  }
+
+  const parsed = EnvSchema.safeParse(present);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Invalid environment configuration:\n${issues}`);
