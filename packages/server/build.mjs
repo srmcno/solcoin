@@ -22,7 +22,13 @@ const watch = process.argv.includes('--watch');
  * plus one native module.
  */
 const options = {
-  entryPoints: [resolve(here, 'src/main.ts'), resolve(here, 'src/cli/doctor.ts'), resolve(here, 'src/cli/migrate.ts')],
+  entryPoints: [
+    resolve(here, 'src/main.ts'),
+    resolve(here, 'src/cli/doctor.ts'),
+    resolve(here, 'src/cli/migrate.ts'),
+    resolve(here, 'src/cli/setup.ts'),
+    resolve(here, 'src/cli/preflight.ts'),
+  ],
   outdir: resolve(here, 'dist'),
   bundle: true,
   platform: 'node',

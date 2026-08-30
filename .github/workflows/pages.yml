@@ -34,10 +34,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Tries to enable Pages, which works when the workflow token is allowed to.
+      # It frequently is not: creating a Pages site for the first time is an
+      # owner-level action, and the token gets "Resource not accessible by
+      # integration" however `pages: write` is declared. The step below turns
+      # that opaque failure into an instruction, because the fix is one setting
+      # and the error does not say so.
       - name: Enable Pages and read its settings
+        id: pages
+        continue-on-error: true
         uses: actions/configure-pages@v5
         with:
           enablement: true
+
+      - name: Explain what to do if Pages is not enabled
+        if: steps.pages.outcome == 'failure'
+        run: |
+          echo "::error title=GitHub Pages is not enabled::This workflow cannot enable it for you."
+          cat <<'MSG'
+
+          Pages could not be enabled from CI. Creating a Pages site for the first
+          time needs a repository owner, and the workflow token is refused with
+          "Resource not accessible by integration" no matter what permissions the
+          workflow declares.
+
+          Enable it once, by hand:
+
+            Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+
+          Then re-run this workflow. Nothing else needs to change, and no later
+          run needs this step to do anything.
+
+          If the Source dropdown is missing, check
+          Settings -> Actions -> General -> Workflow permissions
+          is set to "Read and write permissions".
+
+          MSG
+          exit 1
 
       - name: Check every local link resolves
         # A published page with a dead stylesheet or a broken anchor is the

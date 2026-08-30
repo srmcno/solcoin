@@ -197,6 +197,25 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
         amount: tokenAmount,
         solAmount,
         mayhemMode: false,
+        /*
+         * `cashback: false` makes this a Creator Fee coin, and it is the single
+         * most consequential argument in this call.
+         *
+         * Pump.fun's Cashback Coins, introduced 2026-02-17, redirect the entire
+         * 0.30% creator leg of every bonding-curve trade to the traders' volume
+         * accumulators instead of the creator vault. The choice is made at
+         * creation and is locked permanently: a coin launched in cashback mode
+         * earns its creator nothing on the curve, ever, and no later setting
+         * can change it.
+         *
+         * The SDK currently defaults this to false, so omitting it happens to
+         * do the right thing today. That is not a basis for leaving it out. A
+         * default that flips in a dependency upgrade would silently turn every
+         * future launch into one that cannot earn, with nothing failing and
+         * nothing to see in a diff — the platform would go on reporting
+         * projected fee revenue that could never arrive.
+         */
+        cashback: false,
       });
       instructions.push(...built);
     } else {
@@ -209,6 +228,25 @@ export class PumpFunLaunchAdapter implements LaunchAdapter {
           creator: payerKey,
           user: payerKey,
           mayhemMode: false,
+          /*
+           * `cashback: false` makes this a Creator Fee coin, and it is the single
+           * most consequential argument in this call.
+           *
+           * Pump.fun's Cashback Coins, introduced 2026-02-17, redirect the entire
+           * 0.30% creator leg of every bonding-curve trade to the traders' volume
+           * accumulators instead of the creator vault. The choice is made at
+           * creation and is locked permanently: a coin launched in cashback mode
+           * earns its creator nothing on the curve, ever, and no later setting
+           * can change it.
+           *
+           * The SDK currently defaults this to false, so omitting it happens to
+           * do the right thing today. That is not a basis for leaving it out. A
+           * default that flips in a dependency upgrade would silently turn every
+           * future launch into one that cannot earn, with nothing failing and
+           * nothing to see in a diff — the platform would go on reporting
+           * projected fee revenue that could never arrive.
+           */
+          cashback: false,
         }),
       );
     }

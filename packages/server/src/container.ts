@@ -172,6 +172,8 @@ export interface NotificationsLike {
   list(options: Record<string, unknown>): Promise<unknown[]>;
   markRead(id: string): Promise<void>;
   unreadCount(): Promise<number>;
+  /** Channels that would actually carry a message right now. */
+  dispatchableChannels(): Promise<string[]>;
 }
 
 export interface HealthLike {
@@ -430,7 +432,7 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     const network = config.execution.network;
 
     // --- RPC -----------------------------------------------------------------
-    state.rpc = await buildRpc(network, getCredential);
+    state.rpc = await buildRpcForNetwork(network, getCredential);
 
     // --- Launch adapters -----------------------------------------------------
     /*
@@ -820,7 +822,14 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
  * Public endpoints are always included as a last resort: a platform that stops
  * working because one provider is down is worse than one that runs slowly.
  */
-async function buildRpc(
+/**
+ * Build an RPC for a specific network, independently of the selected one.
+ *
+ * Exported because the mainnet preflight has to ask mainnet about the wallet,
+ * and it runs while the platform is still on simulation or devnet — asking the
+ * currently-selected chain would let a simulated balance clear a mainnet gate.
+ */
+export async function buildRpcForNetwork(
   network: ExecutionNetwork,
   getCredential: (key: string) => Promise<string | null>,
 ): Promise<SolanaRpc | null> {

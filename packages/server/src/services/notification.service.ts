@@ -650,6 +650,21 @@ export class NotificationService {
    * A missing credential is an unconfigured channel, not an error: the platform
    * is designed to run with any subset of its integrations present.
    */
+  /**
+   * Channels that would actually carry a message right now.
+   *
+   * Public because "is anything configured" is a question the mainnet
+   * preflight has to answer, and answering it by looking for stored secrets
+   * gets it wrong: a Discord webhook sitting in the secret store with
+   * `discordEnabled` off delivers nothing, a Telegram token without a chat ID
+   * delivers nothing, and email is filtered out of dispatch entirely because
+   * this service does not implement it. One resolution, used by both, is the
+   * only way the gate and the dispatcher cannot drift apart.
+   */
+  async dispatchableChannels(): Promise<NotificationChannel[]> {
+    return (await this.enabledChannels()).filter((c) => c !== 'email');
+  }
+
   private async enabledChannels(): Promise<NotificationChannel[]> {
     const config = this.settings.get().notifications;
     const channels: NotificationChannel[] = [];

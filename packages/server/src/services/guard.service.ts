@@ -1,4 +1,4 @@
-import { lamportsToSol, solToLamports, TIME } from '@solcoin/shared';
+import { estimatedLaunchCostLamports, lamportsToSol, solToLamports, TIME } from '@solcoin/shared';
 import { AppError } from '../core/errors.js';
 import { componentLogger } from '../core/logger.js';
 import type { Db } from '../db/client.js';
@@ -240,13 +240,17 @@ export class GuardService {
    * SOL cap on the strength of the other's spend being invisible. The row is
    * reconciled to the planned and then the actual cost as they become known.
    *
-   * The 6,000,000 lamport allowance above the developer buy covers mint rent,
-   * the associated token account, and priority fees. It is deliberately on the
-   * high side: over-reserving delays a launch, under-reserving overspends.
+   * The figures come from a launch measured on mainnet, not from a round
+   * number. The previous 6,000,000 lamport allowance described itself as
+   * conservative and was about 30% short of what a launch actually pays —
+   * mint rent alone is 3,695,760, the bonding-curve account 1,691,280 and its
+   * associated token account 2,074,080, before any network fee. Under-reserving
+   * here lets the SOL caps admit more spend than the operator configured,
+   * which is the same defect shape as a reservation recording nothing at all.
    */
   estimatedLaunchCostLamports(): number {
     const config = this.settings.get();
-    return solToLamports(config.execution.devBuySol) + 6_000_000;
+    return estimatedLaunchCostLamports(solToLamports(config.execution.devBuySol));
   }
 
   /**
@@ -320,8 +324,16 @@ export class GuardService {
    * before it can produce the success that would clear the count, so three
    * transient RPC failures disable launching permanently.
    */
-  consecutiveLaunchFailures(): number {
-    const network = this.settings.get().execution.network;
+  /**
+   * Consecutive launch failures on a network.
+   *
+   * Takes the network explicitly so a caller can ask about one it is not
+   * currently switched to. The mainnet preflight has to: it runs before the
+   * switch, and reading the selected network's count would miss unacknowledged
+   * mainnet failures that will halt launching the moment the switch happens.
+   */
+  consecutiveLaunchFailures(forNetwork?: string): number {
+    const network = forNetwork ?? this.settings.get().execution.network;
     const rows = this.db.$raw
       .prepare(
         `SELECT status FROM launches
