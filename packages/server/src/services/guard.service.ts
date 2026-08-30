@@ -324,8 +324,16 @@ export class GuardService {
    * before it can produce the success that would clear the count, so three
    * transient RPC failures disable launching permanently.
    */
-  consecutiveLaunchFailures(): number {
-    const network = this.settings.get().execution.network;
+  /**
+   * Consecutive launch failures on a network.
+   *
+   * Takes the network explicitly so a caller can ask about one it is not
+   * currently switched to. The mainnet preflight has to: it runs before the
+   * switch, and reading the selected network's count would miss unacknowledged
+   * mainnet failures that will halt launching the moment the switch happens.
+   */
+  consecutiveLaunchFailures(forNetwork?: string): number {
+    const network = forNetwork ?? this.settings.get().execution.network;
     const rows = this.db.$raw
       .prepare(
         `SELECT status FROM launches

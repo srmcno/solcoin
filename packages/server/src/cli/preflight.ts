@@ -112,21 +112,40 @@ async function main(): Promise<void> {
      */
     const heliusKey = await container.secrets.get(SECRET_KEYS.heliusApiKey);
     const customUrl = await container.secrets.get(SECRET_KEYS.rpcUrlMainnet);
-    const dedicated = customUrl ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null);
+    /*
+     * Both configured endpoints are probed, and one answering is enough.
+     *
+     * `buildRpcForNetwork` registers the custom URL and Helius ahead of any
+     * public endpoint, so if either works, launches use a dedicated endpoint
+     * and the reliability this check exists to protect is intact. Probing only
+     * the first and blocking on it would fail a perfectly good setup whose
+     * stale custom URL is already being skipped in favour of Helius.
+     */
+    const dedicatedEndpoints: Array<{ label: string; url: string }> = [];
+    if (customUrl) dedicatedEndpoints.push({ label: 'configured endpoint', url: customUrl });
+    if (heliusKey) dedicatedEndpoints.push({ label: 'Helius', url: `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` });
 
-    if (!dedicated) {
+    if (dedicatedEndpoints.length === 0) {
       block(
         'Mainnet RPC',
         'Only the public Solana endpoint is available. It is rate-limited hard enough that launches and fee claims fail intermittently, and a launch that fails after broadcasting still costs you.',
       );
     } else {
-      const reachable = await probeEndpoint(dedicated);
-      if (reachable.ok) {
-        pass('Mainnet RPC', `${customUrl ? 'configured endpoint' : 'Helius'} answered at slot ${reachable.slot}`);
+      const probes = await Promise.all(
+        dedicatedEndpoints.map(async (e) => ({ ...e, result: await probeEndpoint(e.url) })),
+      );
+      const answered = probes.filter((p) => p.result.ok);
+      const failed = probes.filter((p) => !p.result.ok);
+
+      if (answered.length > 0) {
+        pass('Mainnet RPC', answered.map((p) => `${p.label} answered`).join(', '));
+        for (const p of failed) {
+          advise('Mainnet RPC', `${p.label} did not answer: ${'reason' in p.result ? p.result.reason : 'unknown'}. Another dedicated endpoint covers it, but it is dead weight.`);
+        }
       } else {
         block(
           'Mainnet RPC',
-          `A dedicated endpoint is configured but did not answer: ${reachable.reason}. Reads would silently fall through to the public endpoint, which is exactly the unreliability this check exists to catch.`,
+          `No configured endpoint answered (${failed.map((p) => `${p.label}: ${'reason' in p.result ? p.result.reason : 'unknown'}`).join('; ')}). Reads would silently fall through to the public endpoint, which is exactly the unreliability this check exists to catch.`,
         );
       }
     }
@@ -229,12 +248,15 @@ async function main(): Promise<void> {
      * released the stop and stopped there had a platform that would launch
      * nothing, and a gate that said no blockers.
      */
-    const failures = container.guard.consecutiveLaunchFailures();
+    // Mainnet's count, not the selected network's. Preflight runs before the
+    // switch, so reading the current network would miss unacknowledged mainnet
+    // failures that halt launching the instant the switch happens.
+    const failures = container.guard.consecutiveLaunchFailures('mainnet');
     const threshold = settings.limits.consecutiveFailureShutdown;
     if (failures >= threshold) {
       block(
         'Failure breaker',
-        `${failures} consecutive launch failures at a threshold of ${threshold}. Every launch is refused until they are acknowledged (POST /api/system/clear-launch-failures); releasing the emergency stop does not clear this.`,
+        `${failures} consecutive launch failures on mainnet at a threshold of ${threshold}. Every launch is refused until they are acknowledged (POST /api/system/clear-launch-failures); releasing the emergency stop does not clear this.`,
       );
     } else {
       pass('Failure breaker', `${failures} consecutive failures, threshold ${threshold}`);
@@ -264,8 +286,18 @@ async function main(): Promise<void> {
       );
     }
 
-    if (settings.autonomy.launch === 'auto' && settings.execution.phase !== 'phase5_adaptive_autonomous') {
+    /*
+     * Autonomy switched off refuses every launch, manual ones included.
+     * `checkOperational` rejects with `autonomy_off` before any limit is even
+     * consulted, so this belongs with the other settings that make launching
+     * impossible rather than being absent from the report entirely.
+     */
+    if (settings.autonomy.launch === 'off') {
+      block('Autonomy', 'settings.autonomy.launch is off, so every launch is refused before any limit is checked.');
+    } else if (settings.autonomy.launch === 'auto' && settings.execution.phase !== 'phase5_adaptive_autonomous') {
       advise('Autonomy', 'Launching is autonomous. Nobody will see a candidate before it becomes a real token.');
+    } else {
+      pass('Autonomy', `launch autonomy is "${settings.autonomy.launch}"`);
     }
 
     /* --- the honest one ------------------------------------------------ */

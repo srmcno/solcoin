@@ -176,3 +176,46 @@ describe('the consecutive-failure breaker', () => {
     expect(decision.code).toBe('consecutive_failures');
   });
 });
+
+describe('settings that refuse every launch on their own', () => {
+  /**
+   * `checkOperational` rejects with `autonomy_off` before any limit is
+   * consulted, so autonomy switched off refuses launches the gate had nothing
+   * at all to say about.
+   */
+  it('autonomy off refuses launches before any limit is reached', () => {
+    harness.settings.update({ autonomy: { launch: 'off' } }, { type: 'system' });
+    const decision = harness.guard.checkLaunch(5_000_000_000);
+    expect(decision.allowed).toBe(false);
+    expect(decision.code).toBe('autonomy_off');
+  });
+});
+
+describe('the failure breaker is read for the target network', () => {
+  /**
+   * `consecutiveLaunchFailures` filtered on the *selected* network, and
+   * preflight runs before the switch — so unacknowledged mainnet failures were
+   * invisible while the platform sat on simulation, and would halt launching
+   * the instant it switched.
+   */
+  it('sees mainnet failures while the platform is still on simulation', () => {
+    const at = harness.clock.now();
+    for (let i = 0; i < 3; i++) {
+      harness.db.$raw
+        .prepare(`INSERT INTO concepts (id, name, symbol, description, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`)
+        .run(`cpt_m${i}`, `Concept ${i}`, 'CPT', 'a concept used in a breaker test', 'failed', at + i, at + i);
+      harness.db.$raw
+        .prepare(
+          `INSERT INTO launches (id, concept_id, idempotency_key, network, adapter, status, approval_mode, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(`lch_m${i}`, `cpt_m${i}`, `km${i}`, 'mainnet', 'pumpfun_sdk', 'failed', 'manual', at + i, at + i);
+    }
+
+    expect(harness.settings.get().execution.network).toBe('simulation');
+    // What the old check saw: nothing, because it asked about simulation.
+    expect(harness.guard.consecutiveLaunchFailures()).toBe(0);
+    // What preflight asks now.
+    expect(harness.guard.consecutiveLaunchFailures('mainnet')).toBe(3);
+  });
+});
