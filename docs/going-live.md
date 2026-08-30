@@ -26,13 +26,42 @@ to you, the creator**. So:
 your revenue  =  0.0030  ×  (SOL volume traded on the curve)
 ```
 
-**After graduation to a canonical PumpSwap pool**, the creator share becomes
-market-cap tiered. It starts around 0.30%, rises to roughly **0.95%** in the
-mid-cap band, then falls away to about 0.05% for very large caps. Most tokens
-never get here.
+**After graduation to a canonical PumpSwap pool**, the creator share follows a
+25-step ladder keyed to market cap in SOL, decoded from the live fee-config
+account on 2026-08-30. It is **0.30% below 420 SOL of market cap**, jumps to
+its maximum of **0.95% in the 420–1,470 SOL band**, then declines step by step
+to **0.05%** above 98,240 SOL. The total swap fee falls from 1.25% to 0.30%
+across the same ladder. Most tokens never get here.
 
 **On a non-canonical pool** — a Raydium migration, say — the creator share is
 **zero**. You earn nothing from those pools no matter how much they trade.
+
+> ### ⚠ The curve-fee revenue premise is not confirmed
+>
+> On 2026-08-30 an on-chain sample of live pump.fun trades found the 30 bps
+> "creator" leg of the bonding-curve fee being paid to
+> `PDA["user_volume_accumulator", trader]` — **the trader's account, not the
+> coin creator's vault**. Across six consecutive buys and sells against one
+> token, the creator vault's balance did not move at all; a trader was then
+> observed claiming 0.177 SOL out of their own accumulator.
+>
+> If that is the current behaviour, the 0.30% bonding-curve figure is a trader
+> volume rebate and **curve-phase creator revenue is close to zero**, which
+> removes most of the basis for the arithmetic above.
+>
+> **This is not established.** The sample was two tokens and roughly ten
+> transactions, it contradicts pump.fun's published fee documentation, and
+> pump.fun's own public docs repository is demonstrably out of date on fee
+> behaviour in other respects. It could be a misreading of the accounts
+> involved.
+>
+> What to do about it: **verify this yourself before funding anything on the
+> strength of curve fees.** Launch one token on mainnet, let it trade, and
+> watch whether your creator vault balance actually rises. That single
+> experiment costs under 0.01 SOL and settles the question that decides
+> whether this platform can earn anything at all. Post-graduation AMM creator
+> fees are a separate mechanism with a clearer on-chain basis — but most
+> tokens never graduate.
 
 **These figures are protocol state, not constants, and the platform does not
 re-read them.** They are a snapshot in
@@ -49,12 +78,19 @@ as a reason to go and look.
 
 ### What it costs
 
+Measured from a real mainnet launch on 2026-08-30, not estimated:
+
 | Item | Cost |
 | --- | --- |
-| Creating one token | about **0.006 SOL** (mint rent, account rent, priority fee) |
-| Optional developer buy | whatever you set `execution.devBuySol` to — **default 0** |
+| Mint account (Token-2022) | 0.00369576 SOL — varies with metadata length |
+| Bonding-curve account | 0.00169128 SOL |
+| Bonding-curve token account | 0.00207408 SOL |
+| **Creating one token, no dev buy** | **≈ 0.0085 SOL** including network and priority fees |
+| Creator token account, if you dev-buy | + 0.00207408 SOL, plus the buy itself |
+| pump.fun platform fee to create | **0 SOL** |
+| Graduation to PumpSwap | 0.015 SOL, charged if the coin graduates |
 | Claiming fees | 5,000 lamports per claim, plus priority |
-| Stranded vault rent | **890,880 lamports**, once — see below |
+| Stranded curve-vault rent | **890,880 lamports**, once — see below |
 
 The bonding-curve creator vault is derived from *your* address, not from each
 mint, so all your tokens accrue into one vault. Its rent-exempt minimum can
@@ -64,13 +100,14 @@ silently skipping it.
 
 ### The break-even, stated plainly
 
-At 0.30% of curve volume, a token costing 0.006 SOL to create must be traded
-**about 2 SOL** before it has paid for itself.
+At 0.30% of curve volume, a token costing ~0.0085 SOL to create must be traded
+**about 2.8 SOL** before it has paid for itself.
 
 At the shipped default limits — 3 launches a day — you are spending roughly
-**0.018 SOL a day, about 0.55 SOL a month**, before any API costs. To break
-even on-chain your tokens must collectively trade around **180–200 SOL a
-month**.
+**0.026 SOL a day, about 0.77 SOL a month**, before any API costs. To break
+even on-chain your tokens must collectively trade around **255 SOL a month**.
+
+All of which assumes the next section is wrong.
 
 ### The part that decides everything
 
@@ -227,8 +264,53 @@ set is a limit that holds.
 The platform must run continuously to monitor tokens and claim fees. A laptop
 that sleeps will miss both.
 
-`docs/operations.md` has the deployment detail — systemd unit, Docker,
-reverse proxy, the one-scheduler rule for split deployments. In outline:
+### What it costs to host
+
+Prices checked 2026-08-30. All three of these are real VMs with a persistent
+disk you control, root access, systemd for restart-on-crash, and a static IPv4
+that is also the outbound source address — which is what a process holding an
+encrypted key and running 24/7 wants.
+
+| Option | Spec | Price |
+| --- | --- | --- |
+| Hetzner CX23 (EU) | 2 vCPU, 4 GB, 40 GB NVMe | €5.49 / $6.49 per month, plus ~€0.50 for IPv4 |
+| DigitalOcean Basic | 1 vCPU, 1 GB, 25 GB SSD | $6.00 per month |
+| AWS Lightsail | 2 vCPU, 1 GB, 40 GB SSD | $7.00 per month, static IP included |
+
+Fly.io works but fits worst: the filesystem is ephemeral so the key and
+database need a Volume, that Volume is single-host and unreplicated (Fly's own
+docs warn against running one), and a stable outbound IP is a $3.60/month
+add-on. Railway needs the $20/month Pro plan for static outbound IPs at all.
+Hetzner's US regions tripled in price in June 2026 and are no longer
+competitive; use its EU regions or pick DigitalOcean.
+
+**Realistic monthly total:**
+
+| | |
+| --- | --- |
+| Floor | **~$10** — Hetzner or DigitalOcean, Helius free tier, Sonnet for concepts |
+| Sensible | **~$18–22** — the above plus backups, running concepts on Opus |
+| Once you need a paid RPC | **~$60–70** — Helius Developer is $49 and dominates everything else |
+
+The largest lever is the AI model, not the server: moving concept generation
+from Opus to Sonnet saves more per month than the entire VPS costs. The Helius
+free tier (1M credits, 10 req/sec) genuinely suffices for a service doing a
+few reads a minute and a few transactions a day; you need the paid tier for
+staked connections, which matter for landing transactions reliably.
+
+**Terms of service:** none of Hetzner, DigitalOcean, AWS, Railway or Fly.io
+prohibits crypto workloads generally. Hetzner, DigitalOcean and Railway each
+ban *mining* specifically, which does not describe holding a key, signing
+transactions, or calling an RPC. Fly.io and AWS have no crypto clause at all.
+
+One thing no price tier fixes: an encrypted key on disk only helps if the
+passphrase is not sitting beside it. If `SOLCOIN_MASTER_KEY` lives in a `.env`
+on the same box, anyone with disk access has both halves.
+
+### Deployment
+
+`docs/operations.md` has the detail — systemd unit, Docker, reverse proxy, the
+one-scheduler rule for split deployments. In outline:
 
 - a small VPS is sufficient; this is one Node process and a SQLite file
 - put it behind TLS if it is reachable from anywhere but localhost

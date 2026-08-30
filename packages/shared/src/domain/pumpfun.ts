@@ -136,6 +136,65 @@ export function creatorBpsFromTiers(tiers: readonly FeeTier[], marketCapLamports
  */
 export const CURVE_VAULT_RENT_LAMPORTS = 890_880;
 
+/**
+ * Rent and fees a `create_v2` launch actually pays, in lamports.
+ *
+ * Measured from a real mainnet create-and-buy transaction rather than
+ * estimated, because the previous allowance was a single round number that
+ * described itself as conservative and was ~30% short of what a launch costs.
+ * The reservation these feed is what the SOL spend caps are counted against,
+ * so under-reserving lets the caps admit more than they were configured to.
+ *
+ * Measured 2026-08-30 from mainnet tx J3tnjUfr2zh1bHQtZvk4JaTUHL2JkyEYK9NNaj4GyDuA
+ * (mint 8hq8jk4VEE28iDhuw6FvyKRjAZoez5tAKw6bdiixpump).
+ */
+export const LAUNCH_RENT_LAMPORTS = {
+  /**
+   * Token-2022 mint with the metadata pointer extension. NOT a constant: the
+   * account grows with the name, symbol and URI embedded in it, so this is one
+   * measured instance (403 bytes) and the estimate carries headroom for longer
+   * metadata rather than pretending otherwise.
+   */
+  mint: 3_695_760,
+  /** The bonding-curve account itself. */
+  bondingCurve: 1_691_280,
+  /** Token-2022 ATA, 170 bytes — not the 165-byte classic SPL figure. */
+  associatedTokenAccount: 2_074_080,
+} as const;
+
+/**
+ * Network and priority fees observed on that same launch. Priority fees are
+ * inherently variable; this is a working allowance, not a floor.
+ */
+export const LAUNCH_NETWORK_FEE_LAMPORTS = 1_010_000;
+
+/**
+ * Headroom over the measured figures, covering longer embedded metadata and a
+ * busier fee market. Over-reserving delays a launch; under-reserving spends
+ * past a cap the operator set, and only one of those is recoverable.
+ */
+export const LAUNCH_COST_HEADROOM_LAMPORTS = 1_500_000;
+
+/**
+ * What one launch should reserve against the spend caps.
+ *
+ * A developer buy adds the creator's own associated token account, because the
+ * tokens it buys have to land somewhere.
+ */
+export function estimatedLaunchCostLamports(devBuyLamports: number): number {
+  const base =
+    LAUNCH_RENT_LAMPORTS.mint +
+    LAUNCH_RENT_LAMPORTS.bondingCurve +
+    LAUNCH_RENT_LAMPORTS.associatedTokenAccount +
+    LAUNCH_NETWORK_FEE_LAMPORTS +
+    LAUNCH_COST_HEADROOM_LAMPORTS;
+  const creatorAta = devBuyLamports > 0 ? LAUNCH_RENT_LAMPORTS.associatedTokenAccount : 0;
+  return base + creatorAta + Math.max(0, devBuyLamports);
+}
+
+/** Fee charged when a coin graduates from the bonding curve to PumpSwap. */
+export const GRADUATION_FEE_LAMPORTS = 15_000_000;
+
 /** Base transaction fee per signature. */
 export const LAMPORTS_PER_SIGNATURE = 5_000;
 
