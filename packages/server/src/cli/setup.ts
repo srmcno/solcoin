@@ -103,7 +103,17 @@ async function askSecret(question: string): Promise<string> {
   stdin.resume();
 
   return new Promise<string>((resolveInput) => {
-    let buffer = '';
+    /*
+     * Bytes, decoded as UTF-8 at the end — not one `String.fromCharCode` per
+     * byte, which was the bug here.
+     *
+     * A terminal delivers UTF-8, so a password containing `ä` arrives as two
+     * bytes; converting each independently produced `Ã¤`. Both prompts mangled
+     * it identically, so the confirmation matched, the mangled string was
+     * hashed, and the operator could then never sign in with the password they
+     * actually chose. A silent, unrecoverable failure for anyone outside ASCII.
+     */
+    const bytes: number[] = [];
     const onData = (chunk: Buffer): void => {
       for (const byte of chunk) {
         // Enter, or either half of a CRLF.
@@ -111,7 +121,7 @@ async function askSecret(question: string): Promise<string> {
           stdin.off('data', onData);
           stdin.setRawMode(wasRaw);
           stdout.write('\n');
-          resolveInput(buffer.trim());
+          resolveInput(Buffer.from(bytes).toString('utf8').trim());
           return;
         }
         // Ctrl-C: leave the terminal usable, then stop.
@@ -124,10 +134,15 @@ async function askSecret(question: string): Promise<string> {
         }
         // Backspace / delete.
         if (byte === 0x7f || byte === 0x08) {
-          buffer = buffer.slice(0, -1);
+          // Drop a whole character, not a byte: removing one byte of a
+          // multi-byte sequence would leave an invalid fragment behind.
+          while (bytes.length > 0 && (bytes[bytes.length - 1]! & 0xc0) === 0x80) bytes.pop();
+          bytes.pop();
           continue;
         }
-        if (byte >= 0x20) buffer += String.fromCharCode(byte);
+        // Control characters are dropped; every byte >= 0x20, including every
+        // continuation byte of a multi-byte character, is kept.
+        if (byte >= 0x20) bytes.push(byte);
       }
     };
     stdin.on('data', onData);
@@ -141,6 +156,8 @@ const CREDENTIALS: Array<{
   why: string;
   where: string;
   tier: 'needed-to-generate' | 'needed-for-mainnet' | 'optional';
+  /** Notification toggle to switch on when this credential is supplied. */
+  enables?: 'discordEnabled' | 'webhookEnabled' | 'telegramEnabled';
 }> = [
   {
     key: SECRET_KEYS.anthropicApiKey,
@@ -190,6 +207,7 @@ const CREDENTIALS: Array<{
     why: 'Where the platform tells you it launched something, hit a limit, or stopped itself. Running unattended without any notification channel means finding out late.',
     where: 'Discord → Server Settings → Integrations → Webhooks',
     tier: 'optional',
+    enables: 'discordEnabled',
   },
 ];
 
@@ -303,12 +321,23 @@ async function main(): Promise<void> {
       skip('An account already exists; skipping. Use the dashboard to add more.');
     } else {
       note('  This is the login for the dashboard. It is stored locally, hashed.');
-      say();
-      const email = await ask('Email');
-      const displayName = await ask('Display name', email.split('@')[0] ?? 'Owner');
 
+      /*
+       * The whole account is re-asked on failure, not just the password.
+       *
+       * `createUser` validates the email too, and it was previously captured
+       * outside this loop: a mistyped address threw on every attempt while the
+       * loop asked only for the password again, forever, with no way to correct
+       * the thing that was actually wrong. Aborting and restarting the wizard
+       * was the only exit.
+       */
+      let email = '';
       let created = false;
       while (!created) {
+        say();
+        email = await ask('Email');
+        const displayName = await ask('Display name', email.split('@')[0] || 'Owner');
+
         const password = await askSecret('Password (12+ characters)');
         const again = await askSecret('Password again');
         if (password !== again) {
@@ -362,6 +391,20 @@ async function main(): Promise<void> {
         done(`${cred.label} stored and verified (${value.length} characters, encrypted at rest)`);
       } else {
         warn(`${cred.label} did not read back correctly. Check SOLCOIN_MASTER_KEY.`);
+        continue;
+      }
+
+      /*
+       * Storing a webhook is not the same as switching its channel on, and the
+       * difference is silent: `NotificationService` requires both, so a Discord
+       * URL sitting in the secret store with `discordEnabled` off delivers
+       * nothing. An operator who pasted a webhook into this wizard reasonably
+       * believes they will be told when the platform stops itself. Pasting it
+       * here is the opt-in, so the toggle follows it.
+       */
+      if (cred.enables) {
+        container.settings.update({ notifications: { [cred.enables]: true } }, { type: 'system', label: 'setup' });
+        done(`${cred.label} channel switched on`);
       }
     }
 

@@ -17,6 +17,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 export function migrationsFolder(): string {
   const candidates = [
     resolve(here, 'migrations'),
+    // The bundle is emitted to two depths: `dist/main.js` and `dist/cli/*.js`.
+    // Only the second was covered, so the server itself found its migrations
+    // solely because the third candidate happened to match when the process
+    // was started from the repository root. Run it from anywhere else — a
+    // systemd unit with a different WorkingDirectory, a container — and it
+    // died on boot with "Can't find meta/_journal.json".
+    resolve(here, '../src/db/migrations'),
     resolve(here, '../../src/db/migrations'),
     resolve(process.cwd(), 'packages/server/src/db/migrations'),
     resolve(process.cwd(), 'src/db/migrations'),

@@ -1,7 +1,7 @@
 import { loadEnv } from '../config/env.js';
 import { createLogger } from '../core/logger.js';
 import { safeErrorText } from '../core/errors.js';
-import { createContainer } from '../container.js';
+import { createContainer, buildRpcForNetwork } from '../container.js';
 import { closeDatabase } from '../db/client.js';
 import { SECRET_KEYS } from '../security/secrets.js';
 import { lamportsToSol } from '@solcoin/shared';
@@ -95,43 +95,70 @@ async function main(): Promise<void> {
       pass('Metadata storage', 'Pinata configured');
     }
 
-    const notifiers = [
-      SECRET_KEYS.discordWebhook,
-      SECRET_KEYS.slackWebhook,
-      SECRET_KEYS.telegramBotToken,
-      SECRET_KEYS.genericWebhook,
-      SECRET_KEYS.smtpUrl,
-    ].filter((k) => secrets.has(k));
-    if (notifiers.length === 0) {
+    /*
+     * Ask the notification service what it would actually dispatch on, rather
+     * than looking for stored secrets.
+     *
+     * A stored credential is not a working channel: a Discord webhook with
+     * `discordEnabled` off delivers nothing, a Telegram token without a chat
+     * ID delivers nothing, and email is excluded from dispatch entirely
+     * because the service does not implement it. Checking the secret store
+     * passed this gate for exactly those cases — including the one the setup
+     * wizard itself used to produce — and an emergency stop would then have
+     * reached nothing but the in-app inbox.
+     */
+    const channels = await container.notifications.dispatchableChannels();
+    if (channels.length === 0) {
+      const stored = [SECRET_KEYS.discordWebhook, SECRET_KEYS.telegramBotToken, SECRET_KEYS.genericWebhook].filter((k) =>
+        secrets.has(k),
+      );
       block(
         'Notifications',
-        'No channel configured. This platform can engage its own emergency stop; with nowhere to send that, you would find out by opening the dashboard.',
+        stored.length > 0
+          ? 'A webhook credential is stored but no channel is switched on, so nothing would be delivered. Enable it in Settings -> Notifications; Telegram also needs a chat ID. This platform can engage its own emergency stop, and with nowhere to send that you would find out by opening the dashboard.'
+          : 'No channel would deliver anything. This platform can engage its own emergency stop, and with nowhere to send that you would find out by opening the dashboard.',
       );
     } else {
-      pass('Notifications', `${notifiers.length} channel${notifiers.length === 1 ? '' : 's'} configured`);
+      pass('Notifications', `would dispatch on ${channels.join(', ')}`);
     }
 
     /* --- the money itself ---------------------------------------------- */
 
+    /*
+     * Ask mainnet about the wallet, not whichever network is selected.
+     *
+     * `wallet.summary()` returns the balance cached for the *current* network,
+     * and this command is meant to be run before switching — which is when a
+     * simulated wallet (handed a synthetic 2 SOL float so the limits are
+     * exercised end to end) or a funded devnet wallet would satisfy a mainnet
+     * gate while the same address holds nothing on mainnet. Preflight would
+     * then have reported ready for the one case it exists to catch.
+     *
+     * Not being able to ask is itself a blocker. "I could not check" is not
+     * "it is fine", and refusing to guess is this command's whole job.
+     */
     const floorLamports = settings.limits.walletBalanceFloorSol * 1e9;
-    if (!wallet.address) {
-      // Already blocked above; nothing further to say about a wallet that is absent.
-    } else if (wallet.balanceCheckedAt === null) {
-      block(
-        'Wallet balance',
-        'Never fetched. Switch to the target network and let one refresh run, so the balance floor is enforced against a real number rather than a default of zero.',
-      );
-    } else if (wallet.balanceLamports <= floorLamports) {
-      block(
-        'Wallet balance',
-        `${lamportsToSol(wallet.balanceLamports).toFixed(4)} SOL is at or below the ${settings.limits.walletBalanceFloorSol} SOL floor, so every launch will be refused.`,
-      );
-    } else {
-      const usable = lamportsToSol(wallet.balanceLamports) - settings.limits.walletBalanceFloorSol;
-      pass(
-        'Wallet balance',
-        `${lamportsToSol(wallet.balanceLamports).toFixed(4)} SOL, ${usable.toFixed(4)} above the floor`,
-      );
+    if (wallet.address) {
+      const mainnetRpc = await buildRpcForNetwork('mainnet', (key) => container.secrets.get(key)).catch(() => null);
+      if (!mainnetRpc) {
+        block('Wallet balance', 'No mainnet RPC could be built, so the mainnet balance cannot be verified.');
+      } else {
+        const onChain = await mainnetRpc.getBalance(wallet.address).catch((e: unknown) => {
+          block('Wallet balance', `Mainnet RPC could not be reached: ${safeErrorText(e, 120)}`);
+          return null;
+        });
+        if (onChain !== null) {
+          if (onChain <= floorLamports) {
+            block(
+              'Wallet balance',
+              `${lamportsToSol(onChain).toFixed(4)} SOL on mainnet is at or below the ${settings.limits.walletBalanceFloorSol} SOL floor, so every launch would be refused.`,
+            );
+          } else {
+            const usable = lamportsToSol(onChain) - settings.limits.walletBalanceFloorSol;
+            pass('Wallet balance', `${lamportsToSol(onChain).toFixed(4)} SOL on mainnet, ${usable.toFixed(4)} above the floor`);
+          }
+        }
+      }
     }
 
     /* --- the settings that decide how much can go wrong ---------------- */
