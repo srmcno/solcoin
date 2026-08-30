@@ -1,9 +1,14 @@
 name: Deploy project site
 
 # The site under site/ is plain HTML and CSS with no build step, so this only
-# has to publish the directory. `configure-pages` with `enablement: true`
-# turns Pages on the first time it runs, so the deployment does not depend on
-# somebody having clicked through repository settings first.
+# has to publish the directory.
+#
+# Two jobs rather than one, and the split is load-bearing. `environment:` is
+# evaluated before a job's first step runs, so a job that both enables Pages
+# and declares `environment: github-pages` can never succeed on a repository
+# where Pages has not been enabled yet: it is rejected before the step that
+# would have enabled it. Enabling happens here in a job with no environment,
+# and only the deploy job — which by then has a valid environment — declares it.
 
 on:
   push:
@@ -24,15 +29,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure Pages
+      - name: Enable Pages and read its settings
         uses: actions/configure-pages@v5
         with:
           enablement: true
@@ -55,5 +57,12 @@ jobs:
         with:
           path: ./site
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
