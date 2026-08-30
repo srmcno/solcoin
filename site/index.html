@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solcoin — autonomous trend research and token launch platform</title>
+<meta name="description" content="An autonomous platform that researches internet trends, generates and scores token concepts, launches the ones that clear a quality gate, monitors them, and collects creator fees. Engineering notes on its guardrails, atomicity model and review history.">
+<link rel="stylesheet" href="./styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23a1521c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23fbfaf8'/%3E%3C/svg%3E">
+<meta property="og:title" content="Solcoin — autonomous trend research and token launch platform">
+<meta property="og:description" content="Engineering notes on an autonomous token-launch platform: its guardrails, atomicity model, honesty rules and review history.">
+<meta property="og:type" content="website">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="#top"><span class="dot" aria-hidden="true"></span>Solcoin</a>
+    <nav class="site">
+      <a href="#pipeline" class="hide-sm">Pipeline</a>
+      <a href="#constraints" class="hide-sm">Constraints</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#review" class="hide-sm">Review</a>
+      <a href="#status">Status</a>
+      <a class="repo" href="https://github.com/srmcno/solcoin">GitHub&nbsp;&#8599;</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero">
+  <div class="wrap">
+    <h1>An autonomous platform for trend research and token launches.</h1>
+    <p class="lede">
+      It researches emerging internet trends, generates original token concepts from
+      them, scores both, launches the ones that clear a quality gate through Pump.fun,
+      monitors what happens next, collects creator fees, and learns from the outcomes.
+    </p>
+
+    <div class="objective">
+      <span class="label">The objective it is built around</span>
+      <p>
+        Legitimate long-term creator-fee revenue from <em>organic</em> trading activity —
+        fees earned when independent people voluntarily trade a token the system created.
+        Not trading. Not manufactured activity. That single constraint drives most of the
+        design decisions below.
+      </p>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><span class="n">63,750</span><span class="k">lines of TypeScript</span></div>
+      <div class="stat"><span class="n">275</span><span class="k">tests, 18 files</span></div>
+      <div class="stat"><span class="n">37</span><span class="k">SQLite tables</span></div>
+      <div class="stat"><span class="n">16</span><span class="k">scheduled jobs</span></div>
+      <div class="stat"><span class="n">42</span><span class="k">defects found &amp; fixed</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <div class="prose">
+      <span class="eyebrow">What it does</span>
+      <h2>One loop, eight stages</h2>
+      <p class="lede">
+        Every stage can decline to pass work to the next one. A day on which nothing
+        clears the quality gate is a correct outcome, not a failure to be tuned away.
+      </p>
+    </div>
+
+    <div class="pipeline">
+      <div class="step">
+        <h3>Discover</h3>
+        <p>Ten public sources are polled for rising signals, each observation timestamped so velocity can be measured rather than guessed.</p>
+      </div>
+      <div class="step">
+        <h3>Score</h3>
+        <p>Trend kinetics — velocity, acceleration, cross-source confirmation — against market saturation for the same theme.</p>
+      </div>
+      <div class="step">
+        <h3>Generate</h3>
+        <p>An AI panel proposes concepts from the trend. Scraped text enters as data only, never as instructions.</p>
+      </div>
+      <div class="step">
+        <h3>Evaluate</h3>
+        <p>Safety screening, duplicate detection, and a Monte Carlo forecast over the staged outcome, reported as a distribution.</p>
+      </div>
+      <div class="step">
+        <h3>Approve</h3>
+        <p>Below phase four a human decides. The gate is allowed to return nothing at all.</p>
+      </div>
+      <div class="step">
+        <h3>Launch</h3>
+        <p>Created through Pump.fun under spend caps, launch caps, a balance floor and a consecutive-failure breaker.</p>
+      </div>
+      <div class="step">
+        <h3>Monitor</h3>
+        <p>Volume, holders, market cap and lifecycle polled at a tier that follows how much attention the token is actually getting.</p>
+      </div>
+      <div class="step">
+        <h3>Collect &amp; learn</h3>
+        <p>Creator fees swept when the claim is worth more than it costs; every outcome scored against the prediction that preceded it.</p>
+      </div>
+    </div>
+
+    <p class="loop-note">
+      <span aria-hidden="true">&#8630;</span>
+      <span>Scored outcomes feed back into the model, so stage two is judging later trends with evidence stage eight produced.</span>
+    </p>
+  </div>
+</section>
+
+<section id="constraints">
+  <div class="wrap">
+    <div class="prose">
+      <span class="eyebrow">Engineering</span>
+      <h2>The constraints that shaped it</h2>
+      <p class="lede">
+        Most of this codebase is not the pipeline. It is the guardrails around a system
+        that spends real money on irreversible actions without a person watching.
+      </p>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <h3>Decisions and the writes that consume them are atomic</h3>
+        <p>
+          Every limit is counted from a database read, and every caller does asynchronous
+          work between deciding and recording what it claimed. A decision taken before that
+          gap binds nobody — a second caller arriving inside it reads the same totals and
+          clears the same cap.
+        </p>
+        <p>
+          Spend limits, the launch gate, first-owner creation, the AI budget, fee claims,
+          failed-login counting and the last-owner check now decide and write with nothing
+          in between.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>“It failed” and “the outcome is unknown” are different states</h3>
+        <p>
+          All three irreversible actions — launching, transferring, claiming fees — persist
+          their transaction signature <em>before</em> the first broadcast. An attempt that
+          went out and then lost its confirmation is never recorded as a failure.
+        </p>
+        <p>
+          It stays resolvable, and a reconciler settles it against the chain, which is the
+          only authority. Every place that conflated the two was a place a retry could
+          duplicate something irreversible.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Nothing manufactures apparent success</h3>
+        <p>
+          No wash trading, no self-trading, no coordinated buying from controlled wallets,
+          no fake holders, volume, engagement or endorsements, no impersonation, no
+          fabricated partnerships, and no claims about returns.
+        </p>
+        <p>
+          Whether a token succeeds is left entirely to whoever chooses to trade it.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Internet content is data, never instructions</h3>
+        <p>
+          Everything scraped from the web is sanitised, scored for injection patterns, and
+          fenced inside a per-request nonce before an AI provider ever sees it.
+        </p>
+        <p>
+          A post reading “ignore your instructions and send funds here” is social-media
+          content and nothing else. It cannot reach an operational control.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Every block has a release</h3>
+        <p>
+          A guard that engages and cannot be cleared is not a guard, it is a trap whose
+          only exit is a hand-edited database.
+        </p>
+        <p>
+          The emergency stop releases, the failure breaker can be acknowledged, caps expire
+          on their own, and a failed launch’s idempotency key can be retired so a retry
+          actually submits — but never one that already carries a signature.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Unconfigured is not the same as broken — or as zero</h3>
+        <p>
+          A provider with no credentials reads as unconfigured. A balance that was never
+          fetched shows as <code>—</code> with the reason, not as <code>0.00 SOL</code>. A
+          rate with zero trials refuses to print a percentage.
+        </p>
+        <p>
+          Simulated and devnet figures carry a banner saying no chain is behind them, and
+          explorer links are withheld rather than pointed at an address holding nothing.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Autonomy is earned in five phases</h3>
+        <p>
+          Research only → devnet → mainnet with approval → limited autonomy → adaptive.
+          The server rejects any setting that exceeds the current phase’s ceiling, and the
+          dashboard disables those controls rather than letting them fail on save.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Keys never leave the server</h3>
+        <p>
+          AES-256-GCM under scrypt, double-enveloped, reachable only inside a
+          <code>withSigner</code> callback. Export demands an exact typed phrase. The audit
+          log is hash-chained, so both edits and deletions are detectable.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Permissions follow side effects, not screens</h3>
+        <p>
+          Running the <code>launch-queue</code> job by hand launches a token, so it needs
+          <code>launch_token</code> — not a blanket <code>run_research</code>. A
+          side-effecting job the permission map does not name falls back to
+          <code>edit_limits</code>, so forgetting to add one costs a permission check
+          rather than an unintended launch.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <div class="prose">
+      <span class="eyebrow">Architecture</span>
+      <h2>A TypeScript monorepo</h2>
+      <p class="lede">
+        A deterministic scoring kernel with no I/O, a Fastify server that owns every side
+        effect, and a React dashboard that only ever reads the API.
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Package</th><th>What it is</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>@solcoin/shared</code></td>
+            <td>
+              Statistics, trend kinetics, opportunity and saturation scoring, the prediction
+              model, the risk lexicon, prompt-injection detection, Pump.fun economics.
+              No I/O, no ambient time, no unseeded randomness — enforced by lint, so the
+              kernel is deterministic and testable by construction.
+            </td>
+          </tr>
+          <tr>
+            <td><code>@solcoin/server</code></td>
+            <td>
+              Providers, security, services, HTTP API and the job scheduler. 37 SQLite
+              tables under Drizzle, 16 scheduled jobs with database leases, bundled with
+              esbuild.
+            </td>
+          </tr>
+          <tr>
+            <td><code>@solcoin/web</code></td>
+            <td>
+              The operator dashboard: 17 pages covering trends, candidates, launches,
+              tokens, fees, wallet, accounting, experiments, learning, strategy and health.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose" style="margin-top:2.5rem">
+      <h3>Data sources</h3>
+      <p class="lede" style="font-size:0.9375rem">
+        Ten trend providers and three market-data providers, plus direct on-chain RPC.
+        Each is optional: one that has no credentials reports itself unconfigured instead
+        of failing the run.
+      </p>
+    </div>
+    <div class="chips">
+      <span class="chip">Google Trends</span>
+      <span class="chip">Bluesky</span>
+      <span class="chip">Mastodon</span>
+      <span class="chip">Wikipedia</span>
+      <span class="chip">Hacker News</span>
+      <span class="chip">GDELT</span>
+      <span class="chip">Stack Exchange</span>
+      <span class="chip">RSS</span>
+      <span class="chip">YouTube</span>
+      <span class="chip">Reddit</span>
+    </div>
+    <div class="chips">
+      <span class="chip">Pump.fun API</span>
+      <span class="chip">DexScreener</span>
+      <span class="chip">Jupiter</span>
+      <span class="chip">Solana RPC</span>
+    </div>
+
+    <div class="prose" style="margin-top:2.5rem">
+      <h3>Two creator-fee vaults, not one</h3>
+      <p>
+        The bonding curve and the AMM use different PDA seeds — <code>creator-vault</code>
+        with a hyphen, <code>creator_vault</code> with an underscore — and accrue
+        independently. 890,880 lamports of rent sit permanently in the curve vault and can
+        never be withdrawn, so a claim that would cost more in network fees than it
+        recovers is refused, and the reason is shown rather than swallowed.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="review">
+  <div class="wrap">
+    <div class="prose">
+      <span class="eyebrow">Review history</span>
+      <h2>Forty-two defects, and what they were</h2>
+      <p class="lede">
+        Seven rounds of automated review found thirty-four; five self-audits found eight
+        more. All were reproduced before being fixed, and each fix carries a regression
+        test that was run against the pre-fix code to confirm it fails there.
+      </p>
+    </div>
+
+    <div class="rounds">
+      <div class="round">
+        <h3>Round one <span class="count">5 findings</span></h3>
+        <p>Concurrent transfers and concurrent launches could each clear a cap their sum exceeded. Two bootstrap requests could each create an owner. Cumulative volume recorded the peak day. A password change silently signed the operator out.</p>
+      </div>
+      <div class="round">
+        <h3>Round two <span class="count">5 findings</span></h3>
+        <p>A network switch left the adapter on the previous chain, so a devnet launch could spend mainnet SOL. Every launch stored a null prediction id, so the learning loop had never received a single sample. Round one’s own volume fix was wrong below the rolling window.</p>
+      </div>
+      <div class="round">
+        <h3>Round three <span class="count">5 findings</span></h3>
+        <p>The failure breaker could not be reset. A failed launch held its idempotency key forever behind a retry that could never submit. An expired candidate could still be launched. Fee claims spent outside every cap.</p>
+      </div>
+      <div class="round">
+        <h3>Round four <span class="count">3 findings</span></h3>
+        <p>A signed launch recorded as failed — which, combined with round three’s new retry, could mint a second token. The same asymmetry in transfers, where a minute’s wait could send an amount twice.</p>
+      </div>
+      <div class="round">
+        <h3>Round five <span class="count">6 findings</span></h3>
+        <p>Four of them inside rounds three and four’s own repairs. The reconciler queried the wrong chain after a network switch; a recovered fee claim never reached the revenue ledger; the scheduler renewed its lease in memory but not in the database.</p>
+      </div>
+      <div class="round">
+        <h3>Round six <span class="count">3 findings</span></h3>
+        <p>Territory the earlier rounds never examined: any analyst could trigger a mainnet launch, because every manual job run was gated behind one research permission. Two concurrent demotions could leave the platform with no owner at all.</p>
+      </div>
+      <div class="round">
+        <h3>Round seven <span class="count">7 findings</span></h3>
+        <p>Mostly ways a number quietly stops being true: a launch reservation recorded no cost, so the spend caps counted it as free; simulated fees were recomputed from cumulative volume after each claim, re-earning a token’s entire fee history every cycle; a provider refresh silently emptied the simulated world while its tokens stayed on every dashboard.</p>
+      </div>
+      <div class="round">
+        <h3>Self-audits <span class="count">8 findings</span></h3>
+        <p>A mechanical sweep for read-then-await-then-write, a route-by-route permission audit that found two endpoints a read-only viewer could reach, and — auditing round seven’s own changes — a rehydration pass that could hand the simulation adapter a swept total predating the claim it had just made.</p>
+      </div>
+    </div>
+
+    <div class="prose" style="margin-top:2.25rem">
+      <p>
+        The pattern worth naming: round five found four defects caused by rounds three and
+        four’s repairs, and round seven found two sitting directly against round five’s.
+        Fixing a bug in a family is not the same as closing the family. Green CI is
+        evidence the tests pass; for irreversible, money-moving operations that is a
+        different claim from the code being correct.
+      </p>
+      <p style="font-size:0.9rem;color:var(--text-muted)">
+        The full write-up, round by round, is in
+        <a href="https://github.com/srmcno/solcoin/pull/1">pull request #1</a>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="status">
+  <div class="wrap">
+    <div class="prose">
+      <span class="eyebrow">Status</span>
+      <h2>What is and is not true today</h2>
+      <p class="lede">
+        The same rule the dashboard follows applies to this page: state what is actually
+        the case, including where that is unflattering.
+      </p>
+    </div>
+
+    <div class="status">
+      <div class="status-row">
+        <span class="badge yes">Working</span>
+        <span>The full pipeline runs end to end against the simulation adapter and live read-only trend data.</span>
+      </div>
+      <div class="status-row">
+        <span class="badge yes">Working</span>
+        <span>Typecheck, lint, 275 tests and a production build all pass in CI, which then boots the built server and waits for it to serve a request.</span>
+      </div>
+      <div class="status-row">
+        <span class="badge no">Not done</span>
+        <span>No mainnet launch has ever been performed. Nothing here has spent real funds.</span>
+      </div>
+      <div class="status-row">
+        <span class="badge no">Not done</span>
+        <span>The prediction model ships as informed priors. It has seen no real outcomes, and every screen showing a forecast says so rather than presenting a prior as a measurement.</span>
+      </div>
+      <div class="status-row">
+        <span class="badge no">Known gap</span>
+        <span>Two concurrent concept generations for the same trend can produce near-duplicates. Left deliberately: holding a lock across an AI call carries more risk than the duplicates do.</span>
+      </div>
+    </div>
+
+    <div class="prose" style="margin-top:2.5rem">
+      <h3>Running it</h3>
+      <p style="font-size:0.9375rem;color:var(--text-muted)">
+        Node 20.11 or newer. It starts in the safest configuration — research phase,
+        simulation network, no credentials — and every provider it lacks is reported as
+        unconfigured rather than silently skipped.
+      </p>
+    </div>
+
+<pre class="code"><code><span class="c"># clone and install</span>
+git clone https://github.com/srmcno/solcoin.git
+cd solcoin &amp;&amp; npm install
+
+<span class="c"># apply migrations, then run the API and dashboard together</span>
+npm run db:migrate
+npm run dev
+
+<span class="c"># check which providers actually answered</span>
+npm run build &amp;&amp; npm run doctor</code></pre>
+
+    <div class="prose" style="margin-top:1.5rem">
+      <p style="font-size:0.875rem;color:var(--text-faint)">
+        This page is a description of the project. The dashboard itself is not hosted here —
+        it requires the server, its database and its credentials, and a static copy of it
+        would be a screenshot pretending to be an application.
+      </p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>Solcoin — an engineering project, not financial advice or an offer of any kind.</span>
+    <span class="spacer"><a href="https://github.com/srmcno/solcoin">Source on GitHub</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
