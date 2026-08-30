@@ -152,3 +152,45 @@ describe('statistics kernel', () => {
     expect(topShare(even, 0.1)).toBeCloseTo(0.1, 2);
   });
 });
+
+describe('untrained base rates', () => {
+  /**
+   * The graduation prior is what every revenue projection rests on until the
+   * model has scored real outcomes — which is the whole first phase of
+   * operation. It sat at 0.012 against a measured 0.00198, so every forecast
+   * was six times too optimistic in the direction that costs money.
+   *
+   * Pinned to the published measurement rather than left as a judgement call:
+   * 0.198% pooled over 832,941 launches, Wilson 95% interval 0.189-0.208%
+   * (arXiv:2607.02823).
+   */
+  it('uses the measured graduation rate, inside its published interval', async () => {
+    const { BASE_RATES } = await import('@solcoin/shared');
+    expect(BASE_RATES.graduation).toBeGreaterThanOrEqual(0.00189);
+    expect(BASE_RATES.graduation).toBeLessThanOrEqual(0.00208);
+  });
+
+  /**
+   * Graduation is a strictly harder outcome than reaching a hundred holders,
+   * and `predict` caps it by that. A prior ordering that contradicted the cap
+   * would make the cap silently load-bearing rather than a safety net.
+   */
+  it('orders the funnel from easiest to hardest', async () => {
+    const { BASE_RATES } = await import('@solcoin/shared');
+    expect(BASE_RATES.firstBuy).toBeGreaterThan(BASE_RATES.tenHolders);
+    expect(BASE_RATES.tenHolders).toBeGreaterThan(BASE_RATES.hundredHolders);
+    expect(BASE_RATES.hundredHolders).toBeGreaterThan(BASE_RATES.graduation);
+  });
+
+  /** Every base rate has to be a probability for the logit bias to be finite. */
+  it('keeps every rate a usable probability', async () => {
+    const { BASE_RATES, PRIOR_BIASES } = await import('@solcoin/shared');
+    for (const [name, rate] of Object.entries(BASE_RATES)) {
+      expect(rate, name).toBeGreaterThan(0);
+      expect(rate, name).toBeLessThan(1);
+    }
+    for (const [name, bias] of Object.entries(PRIOR_BIASES)) {
+      expect(Number.isFinite(bias), name).toBe(true);
+    }
+  });
+});
