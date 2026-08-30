@@ -11,6 +11,10 @@ creation is a few hundred lines. Knowing *which* token is worth creating, *when*
 and being honest with yourself about whether it worked, is the hard part and is
 where almost all of this codebase lives.
 
+**Project site:** https://srmcno.github.io/solcoin/ — architecture, the guardrails,
+and the full review history. The dashboard itself is not hosted there; it needs the
+server, its database and its credentials.
+
 ---
 
 ## What it actually does

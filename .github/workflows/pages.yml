@@ -1,0 +1,59 @@
+name: Deploy project site
+
+# The site under site/ is plain HTML and CSS with no build step, so this only
+# has to publish the directory. `configure-pages` with `enablement: true`
+# turns Pages on the first time it runs, so the deployment does not depend on
+# somebody having clicked through repository settings first.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy that is already publishing; queue behind it instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Check every local link resolves
+        # A published page with a dead stylesheet or a broken anchor is the
+        # static-site version of a button that does nothing.
+        run: |
+          cd site
+          status=0
+          for href in $(grep -oE '(href|src)="\./[^"]+"' index.html | sed -E 's/.*"\.\/(.*)"/\1/' | sort -u); do
+            if [ ! -f "$href" ]; then echo "missing asset: $href"; status=1; fi
+          done
+          for anchor in $(grep -oE 'href="#[a-z-]+"' index.html | sed -E 's/href="#(.*)"/\1/' | sort -u); do
+            if ! grep -q "id=\"$anchor\"" index.html; then echo "dead anchor: #$anchor"; status=1; fi
+          done
+          exit $status
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
