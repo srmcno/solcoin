@@ -41,6 +41,28 @@ const pass = (label: string, detail: string): void => void checks.push({ label, 
 const block = (label: string, detail: string): void => void checks.push({ label, state: 'block', detail });
 const advise = (label: string, detail: string): void => void checks.push({ label, state: 'advice', detail });
 
+
+/**
+ * Ask one endpoint, and only that endpoint, for its current slot.
+ *
+ * Deliberately a bare connection rather than the platform's `SolanaRpc`, whose
+ * whole job is to fail over to another endpoint — which is the behaviour that
+ * made this check meaningless.
+ */
+async function probeEndpoint(url: string): Promise<{ ok: true; slot: number } | { ok: false; reason: string }> {
+  try {
+    const { Connection } = await import('@solana/web3.js');
+    const connection = new Connection(url, { commitment: 'confirmed', disableRetryOnRateLimit: true });
+    const slot = await Promise.race([
+      connection.getSlot('confirmed'),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out after 10s')), 10_000)),
+    ]);
+    return { ok: true, slot };
+  } catch (e) {
+    return { ok: false, reason: safeErrorText(e, 120) };
+  }
+}
+
 async function main(): Promise<void> {
   const env = loadEnv();
   createLogger({ level: 'error', pretty: false });
@@ -78,13 +100,35 @@ async function main(): Promise<void> {
 
     /* --- things that make a launch unreliable rather than impossible --- */
 
-    if (!secrets.has(SECRET_KEYS.heliusApiKey) && !secrets.has(SECRET_KEYS.rpcUrlMainnet)) {
+    /*
+     * Probe the dedicated endpoint itself, not the fallback chain.
+     *
+     * `buildRpcForNetwork` appends the public endpoints behind whatever is
+     * configured, and `SolanaRpc.call` falls through to them transparently. So
+     * a revoked Helius key or a dead custom URL still let every read succeed —
+     * over the public endpoint — and this gate reported a dedicated RPC ready
+     * on the strength of a secret merely existing. The point of the check is
+     * reliability under load, which a public endpoint does not provide.
+     */
+    const heliusKey = await container.secrets.get(SECRET_KEYS.heliusApiKey);
+    const customUrl = await container.secrets.get(SECRET_KEYS.rpcUrlMainnet);
+    const dedicated = customUrl ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null);
+
+    if (!dedicated) {
       block(
         'Mainnet RPC',
         'Only the public Solana endpoint is available. It is rate-limited hard enough that launches and fee claims fail intermittently, and a launch that fails after broadcasting still costs you.',
       );
     } else {
-      pass('Mainnet RPC', 'a dedicated endpoint is configured');
+      const reachable = await probeEndpoint(dedicated);
+      if (reachable.ok) {
+        pass('Mainnet RPC', `${customUrl ? 'configured endpoint' : 'Helius'} answered at slot ${reachable.slot}`);
+      } else {
+        block(
+          'Mainnet RPC',
+          `A dedicated endpoint is configured but did not answer: ${reachable.reason}. Reads would silently fall through to the public endpoint, which is exactly the unreliability this check exists to catch.`,
+        );
+      }
     }
 
     if (!secrets.has(SECRET_KEYS.pinataJwt)) {

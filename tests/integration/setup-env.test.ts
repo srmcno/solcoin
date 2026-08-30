@@ -86,3 +86,36 @@ describe('master key selection', () => {
     expect(readFileSync(result.path, 'utf8')).toContain('PORT=4317');
   });
 });
+
+describe('whitespace around an environment-supplied key', () => {
+  /**
+   * `loadEnv` encrypts with the raw environment value, whitespace included,
+   * and a `.env` file cannot store it that way — `loadDotEnv` trims every
+   * value it reads back. Persisting the trimmed form would record a key that
+   * decrypts nothing the raw one encrypted: the same unrecoverable wallet as
+   * writing an unrelated key, by a quieter route.
+   */
+  it.each([
+    ['a trailing newline, as a secret file produces', 'a-key-from-a-secret-file\n'],
+    ['a trailing space', 'a-key-with-a-trailing-space '],
+    ['a leading space', ' a-key-with-a-leading-space'],
+  ])('refuses %s', (_label, value) => {
+    process.env.SOLCOIN_MASTER_KEY = value;
+    expect(() => ensureEnvFile(dir)).toThrow(/whitespace/i);
+  });
+
+  it('accepts a clean key', () => {
+    process.env.SOLCOIN_MASTER_KEY = 'a-perfectly-clean-master-key';
+    expect(ensureEnvFile(dir).source).toBe('environment');
+    expect(keyIn(join(dir, '.env'))).toBe('a-perfectly-clean-master-key');
+  });
+
+  /**
+   * The check must not fire on a value too short to be a key at all — that is
+   * the "no key supplied" path, which generates one.
+   */
+  it('ignores a too-short environment value entirely', () => {
+    process.env.SOLCOIN_MASTER_KEY = '  short  ';
+    expect(ensureEnvFile(dir).source).toBe('generated');
+  });
+});

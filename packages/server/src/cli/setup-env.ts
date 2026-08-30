@@ -14,7 +14,31 @@ import { AppError } from '../core/errors.js';
 export function ensureEnvFile(root: string): { created: boolean; source: 'generated' | 'existing' | 'environment'; path: string } {
   const path = resolve(root, '.env');
   const examplePath = resolve(root, '.env.example');
-  const fromEnvironment = (process.env.SOLCOIN_MASTER_KEY ?? '').trim();
+  const rawFromEnvironment = process.env.SOLCOIN_MASTER_KEY ?? '';
+  const fromEnvironment = rawFromEnvironment.trim();
+
+  /*
+   * Surrounding whitespace has to be rejected, not trimmed away.
+   *
+   * `loadEnv` encrypts with the *raw* environment value, whitespace included —
+   * a trailing newline inherited from a secret file is the common case. A
+   * `.env` file cannot represent that: `loadDotEnv` trims every value it
+   * reads, so whatever is written here comes back trimmed. Persisting the
+   * trimmed form would therefore record a key that does not decrypt anything
+   * the raw one encrypted, which is the same unrecoverable wallet as writing
+   * an unrelated key, reached by a quieter route.
+   *
+   * Trimming it at load time instead would break any deployment already
+   * encrypting with an untrimmed key. So the operator is told.
+   */
+  if (fromEnvironment.length >= 16 && rawFromEnvironment !== fromEnvironment) {
+    throw new AppError(
+      'validation_failed',
+      'SOLCOIN_MASTER_KEY has leading or trailing whitespace. It is used verbatim to encrypt the wallet, ' +
+        'but a .env file cannot store it that way, so the two would disagree and the wallet would become ' +
+        'unreadable. Remove the whitespace — often a trailing newline from a secret file — and run setup again.',
+    );
+  }
 
   const readKey = (text: string): string => (/^SOLCOIN_MASTER_KEY=(.*)$/m.exec(text)?.[1] ?? '').trim();
   const withKey = (text: string, key: string): string =>
