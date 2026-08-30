@@ -4,6 +4,7 @@ import { safeErrorText } from '../core/errors.js';
 import { createContainer, buildRpcForNetwork } from '../container.js';
 import { closeDatabase } from '../db/client.js';
 import { SECRET_KEYS } from '../security/secrets.js';
+import { launchImpossibleReasons } from './preflight-checks.js';
 import { lamportsToSol } from '@solcoin/shared';
 
 /**
@@ -169,12 +170,29 @@ async function main(): Promise<void> {
       pass('Emergency stop', 'not engaged');
     }
 
+    /*
+     * A limit that refuses every launch is a blocker, not a note.
+     *
+     * `GuardService` reserves `devBuySol + 0.006` and tests it against the
+     * per-transaction, hourly and daily SOL caps, and counts launches against
+     * the hourly and daily launch caps. Any of those set below what one launch
+     * needs means every mainnet launch is refused — while this command printed
+     * "No blockers" and the operator went looking for the wrong problem.
+     */
     const dailyCeiling = settings.limits.maxSolSpendPerDay;
-    const perLaunch = settings.execution.devBuySol + 0.006;
-    advise(
-      'Daily exposure',
-      `At most ${dailyCeiling} SOL/day and ${settings.limits.maxLaunchesPerDay} launches/day. One launch costs roughly ${perLaunch.toFixed(4)} SOL, so a bad day costs about ${Math.min(dailyCeiling, settings.limits.maxLaunchesPerDay * perLaunch).toFixed(3)} SOL. Decide whether you are willing to lose that every day before proceeding.`,
-    );
+    const perLaunch = container.guard.estimatedLaunchCostLamports() / 1e9;
+
+    const impossible = launchImpossibleReasons(settings.limits, perLaunch);
+
+    if (impossible.length > 0) {
+      block('Limits', `Every launch would be refused: ${impossible.join('; ')}.`);
+    } else {
+      pass('Limits', `one launch reserves ${perLaunch.toFixed(4)} SOL and every cap admits it`);
+      advise(
+        'Daily exposure',
+        `At most ${dailyCeiling} SOL/day and ${settings.limits.maxLaunchesPerDay} launches/day. One launch reserves roughly ${perLaunch.toFixed(4)} SOL, so a bad day costs about ${Math.min(dailyCeiling, settings.limits.maxLaunchesPerDay * perLaunch).toFixed(3)} SOL. Decide whether you are willing to lose that every day before proceeding.`,
+      );
+    }
 
     if (settings.autonomy.launch === 'auto' && settings.execution.phase !== 'phase5_adaptive_autonomous') {
       advise('Autonomy', 'Launching is autonomous. Nobody will see a candidate before it becomes a real token.');
@@ -182,8 +200,13 @@ async function main(): Promise<void> {
 
     /* --- the honest one ------------------------------------------------ */
 
-    const bundle = container.predictions.getBundle() as { trainedOnSamples?: number } | null;
-    const samples = Number(bundle?.trainedOnSamples ?? 0);
+    // `trainedOn`, which is what a bundle actually exposes and what `doctor`
+    // and the backtest service both read. The previous cast invented
+    // `trainedOnSamples` and, being a cast, silenced the mismatch — so every
+    // operator was told the model had zero outcomes behind it however many it
+    // had actually scored.
+    const bundle = container.predictions.getBundle() as { trainedOn?: number } | null;
+    const samples = Number(bundle?.trainedOn ?? 0);
     if (samples < 30) {
       advise(
         'Model evidence',

@@ -1,5 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
@@ -10,6 +9,7 @@ import { createContainer } from '../container.js';
 import { openDatabase, closeDatabase } from '../db/client.js';
 import { runMigrations } from '../db/migrate.js';
 import { SECRET_KEYS } from '../security/secrets.js';
+import { ensureEnvFile } from './setup-env.js';
 
 /**
  * `npm run setup` — the guided path from a fresh clone to a running platform.
@@ -219,39 +219,6 @@ const TIER_LABEL: Record<string, string> = {
 
 /* ------------------------------------------------------------------ env --- */
 
-/**
- * Ensure a `.env` exists with a master key.
- *
- * The master key encrypts every credential and the wallet keystore. Losing it
- * makes all of them unrecoverable, which is why this generates one rather than
- * asking the operator to invent it, states plainly what it protects, and never
- * regenerates over an existing value.
- */
-function ensureEnvFile(root: string): { created: boolean; hasKey: boolean; path: string } {
-  const path = resolve(root, '.env');
-  const examplePath = resolve(root, '.env.example');
-
-  if (!existsSync(path)) {
-    const template = existsSync(examplePath) ? readFileSync(examplePath, 'utf8') : 'SOLCOIN_MASTER_KEY=\n';
-    const withKey = template.replace(/^SOLCOIN_MASTER_KEY=.*$/m, `SOLCOIN_MASTER_KEY=${randomBytes(32).toString('base64')}`);
-    writeFileSync(path, withKey, { mode: 0o600 });
-    chmodSync(path, 0o600);
-    return { created: true, hasKey: true, path };
-  }
-
-  const current = readFileSync(path, 'utf8');
-  const match = /^SOLCOIN_MASTER_KEY=(.*)$/m.exec(current);
-  const value = (match?.[1] ?? '').trim();
-  if (value.length >= 16) return { created: false, hasKey: true, path };
-
-  const filled = match
-    ? current.replace(/^SOLCOIN_MASTER_KEY=.*$/m, `SOLCOIN_MASTER_KEY=${randomBytes(32).toString('base64')}`)
-    : `${current.trimEnd()}\nSOLCOIN_MASTER_KEY=${randomBytes(32).toString('base64')}\n`;
-  writeFileSync(path, filled, { mode: 0o600 });
-  chmodSync(path, 0o600);
-  return { created: false, hasKey: true, path };
-}
-
 /* ----------------------------------------------------------------- main --- */
 
 async function main(): Promise<void> {
@@ -284,10 +251,14 @@ async function main(): Promise<void> {
   done(`Node ${process.version}`);
 
   const env0 = ensureEnvFile(root);
-  if (env0.created) {
+  if (env0.source === 'environment') {
+    done('Using the master key already set in the environment, and recorded it in .env (mode 0600)');
+  } else if (env0.created) {
     done('Created .env with a freshly generated master key (mode 0600)');
+  } else if (env0.source === 'generated') {
+    done('.env had no master key; generated one (mode 0600)');
   } else {
-    done('.env already present, master key left untouched');
+    done('.env already present, master key left untouched, permissions tightened to 0600');
   }
 
   say();
