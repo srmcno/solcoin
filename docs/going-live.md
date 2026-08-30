@@ -31,7 +31,14 @@ your revenue  =  0.0030  ×  (SOL volume traded on the curve)
 account on 2026-08-30. It is **0.30% below 420 SOL of market cap**, jumps to
 its maximum of **0.95% in the 420–1,470 SOL band**, then declines step by step
 to **0.05%** above 98,240 SOL. The total swap fee falls from 1.25% to 0.30%
-across the same ladder. Most tokens never get here.
+across the same ladder, and a parallel 25-tier ladder with the same creator
+rates applies to USDC-denominated pools. Most tokens never get here.
+
+Two details worth knowing if you reconcile against pump.fun's published table:
+where its docs show half-basis-point rates (0.275%, 0.225%, 0.175%, 0.125%,
+0.075%) the on-chain config actually charges 28, 23, 18, 13 and 8 bps; and
+pump.fun has signalled an intent to replace this dynamic-fee model entirely,
+which is a further reason not to treat the snapshot below as durable.
 
 **On a non-canonical pool** — a Raydium migration, say — the creator share is
 **zero**. You earn nothing from those pools no matter how much they trade.
@@ -117,39 +124,68 @@ see the box above.
 None of the above is the hard question. The hard question is what fraction of
 launched tokens trade *anything at all*.
 
-Public figures, checked 2026-08-30:
+The best evidence is a survival analysis of **832,941 launches** observed
+between 2026-05-08 and 2026-06-10
+([arXiv:2607.02823](https://arxiv.org/abs/2607.02823)), which is a far better
+basis than the journalistic figures that circulate:
 
 | | |
 | --- | --- |
-| Tokens that graduate the bonding curve | **~1.15%** of launches at its best in early 2026, having collapsed to **~0.26%** in mid-June 2026; historically "fewer than 2%" |
+| Pooled graduation rate | **0.198%** (Wilson 95% CI 0.189–0.208%) — the authors call this a lower bound |
+| Earlier comparison point | 0.63% for Sept–Oct 2025, so a 3.2× decline in under a year |
+| Gone on launch day | **~70%**, and 80% within two days |
+| Surviving past 90 days | **4.55%** |
+| Ever held $1,000 of liquidity | ~97,000 of roughly 7 million launched — about **1.4%** |
 | Graduation threshold | roughly **85 SOL** of curve purchases |
-| Of those that *do* graduate | "very few trade for more than a month, and many end their trading arc within a day" |
-| Ever exceeded $10M market cap | **18 tokens**, across the platform's entire history |
 
-Now put that against the arithmetic. Take 100 launches:
+Now put that against the cost arithmetic. Take **1,000** launches:
 
-- They cost **0.85 SOL** to create.
-- About **one** graduates. Graduating means ≥85 SOL of curve volume, so that
-  token alone returns **≥0.255 SOL** in creator fees, plus whatever the AMM
-  tier pays afterwards. Roughly 30× its own launch cost.
-- Which still leaves about **0.6 SOL** to be earned by the other 99 — around
-  **200 SOL of combined volume**, or **~2 SOL each**.
+- They cost **8.5 SOL** to create.
+- About **two** graduate. Each means ≥85 SOL of curve volume, so the pair
+  returns **≥0.51 SOL** in creator fees — about **6%** of what the thousand
+  launches cost.
+- Which leaves roughly **8 SOL** to be earned by the other 998, or about
+  **2.7 SOL of trading volume each**.
 
-So the whole question is whether a typical non-graduating token trades about
-two SOL. Nobody publishes that number. It is the one figure that decides
-whether this operation makes money, and it cannot be looked up — which is
-precisely why the first months are for *measuring* it rather than earning
-from it.
+And the liquidity figure says that is implausible: if only ~1.4% of tokens ever
+hold $1,000 of liquidity — under 5 SOL at recent prices — then the typical
+token is nowhere near trading 2.7 SOL.
+
+**So on these numbers, launching at volume with no differentiator loses money.**
+That is the honest reading, and it is the number this platform exists to try to
+beat by selecting better rather than launching more.
+
+### Two levers the same study actually measured
+
+| Lever | Effect |
+| --- | --- |
+| A **Telegram channel** on the listing | graduates at **1.485%** vs 0.166% without — an **8.94× lift** (Cox HR 5.40, CI 4.73–6.17) |
+| **Initial market cap above the 30 SOL default** | the strongest single predictor (Cox HR 4.51); top quartile graduated at 0.634% |
+
+Both are real and both come with a condition.
+
+The second is a developer buy — `execution.devBuySol`, which ships at 0. Raising
+it is a genuine capital commitment that raises your cost and your loss per
+failed launch in exchange for a better shot. That is a straightforward risk
+trade and the caps are there to bound it.
+
+The first needs stating carefully. A **real** community channel that a person
+actually runs is a legitimate thing to attach. An **empty** channel created
+only to trip the signal is manufacturing an appearance of community that does
+not exist — which is precisely what this platform is built not to do, and no
+amount of measured lift makes it something else. The platform does not create
+social channels, and this document is not suggesting it should start.
+
+What follows:
 
 What follows:
 
 - **Expected value is dominated by the tail.** Reasoning from a median outcome
   misleads in one direction; reasoning from a good one misleads much further
   in the other.
-- **Small samples tell you nothing.** Ten launches cannot distinguish a good
-  selection process from a lucky one — at a 1% graduation rate, ten launches
-  most likely contain zero graduations whether your selection is excellent or
-  worthless.
+- **Small samples tell you nothing.** At a 0.2% base rate, five hundred launches
+  most likely contain one graduation whether your selection is excellent or
+  worthless. Ten launches are not evidence of anything at all.
 - **The realistic goal of the first months is not profit.** It is a dataset:
   enough scored predictions to know whether the selection process beats
   chance. Until then you are paying for information.
@@ -175,12 +211,13 @@ Decide now what you are willing to spend to find that out, set
 `limits.maxSolSpendPerDay` to that number divided by thirty, and let the caps
 enforce it rather than your judgement at 2am.
 
-Sources for the figures above:
-[The Block's daily graduated-token metric](https://www.theblock.co/data/on-chain-metrics/solana/pump-fun-percent-graduated-tokens-daily/embed),
-[Cryptopolitan on the 1.15% peak](https://www.cryptopolitan.com/pump-fun-graduating-tokens-break-to-1-15-of-new-launches/),
-[DEXTools on the June 2026 collapse](https://www.dextools.io/news/pump-fun-graduation-collapse-solana-fees-2026),
-[Solana Compass on the sub-2% rate](https://solanacompass.com/news/pumpfun-launched-42000-tokens-in-one-day-fewer-than-2-will-ever-reach-a-dex),
-and [pump.fun's own bonding-curve documentation](https://pump.fun/docs/bonding-curve).
+Sources: the graduation rate, the confidence interval, the Telegram lift and
+the market-cap predictor are all from
+[Pump.fun Graduation Regime Windows (arXiv:2607.02823)](https://arxiv.org/abs/2607.02823),
+whose dataset is published under CC-BY-4.0. Survival figures from
+[CoinGecko's lifespan study](https://www.coingecko.com/research/publications/average-lifespan-of-pumpfun-tokens);
+the graduation threshold from
+[pump.fun's bonding-curve documentation](https://pump.fun/docs/bonding-curve).
 
 > This is an engineering document, not financial advice. Creating and
 > distributing tokens has tax and regulatory consequences that differ by
