@@ -392,6 +392,38 @@
         <h3>Self-audits <span class="count">8 findings</span></h3>
         <p>A mechanical sweep for read-then-await-then-write, a route-by-route permission audit that found two endpoints a read-only viewer could reach, and — auditing round seven’s own changes — a rehydration pass that could hand the simulation adapter a swept total predating the claim it had just made.</p>
       </div>
+
+      <div class="round">
+        <h3>Rounds eight to twelve <span class="count">17 findings, on the operator tooling</span></h3>
+        <p>
+          A separate review of the setup wizard and the mainnet readiness gate, and
+          a worse record than the platform itself: ten of the seventeen were cases
+          where something built to say “not yet” said “ready”.
+        </p>
+        <p>
+          The wizard printed every secret it promised to hide — raw mode stopped
+          the terminal driver echoing, but the readline interface kept redrawing
+          the keystrokes, so passwords, API keys and any pasted wallet private key
+          went to the screen. Two separate defects would have made a funded wallet
+          permanently unrecoverable: one wrote down a freshly generated master key
+          while encrypting with a different one supplied by the environment, the
+          other persisted a key trimmed of whitespace that the encryption had used
+          verbatim.
+        </p>
+        <p>
+          The rest were gates that passed on a proxy rather than the condition:
+          a balance read from the wrong network, a balance compared against a floor
+          that is applied after the spend rather than before, an RPC check that
+          never asked the endpoint anything, notification channels counted from
+          stored secrets rather than from what would actually dispatch, limits that
+          refuse every launch treated as advice, and autonomy switched off producing
+          no check at all.
+        </p>
+        <p>
+          Two of the last three were defects in checks added earlier in that same
+          review to fix earlier defects of the same kind.
+        </p>
+      </div>
     </div>
 
     <div class="prose" style="margin-top:2.25rem">
@@ -404,7 +436,9 @@
       </p>
       <p style="font-size:0.9rem;color:var(--text-muted)">
         The full write-up, round by round, is in
-        <a href="https://github.com/srmcno/solcoin/pull/1">pull request #1</a>.
+        <a href="https://github.com/srmcno/solcoin/pull/1">pull request #1</a> for the
+        platform and <a href="https://github.com/srmcno/solcoin/pull/4">pull request #4</a>
+        for the operator tooling.
       </p>
     </div>
   </div>
