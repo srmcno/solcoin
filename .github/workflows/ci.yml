@@ -54,6 +54,14 @@ jobs:
       # A bundled server can typecheck, build and test perfectly and still die
       # on boot — that is exactly how the pino worker-transport bug behaved, so
       # this starts the real bundle and waits for it to serve a request.
+      # The wizard promises hidden input. Verifying that needs a real pty on
+      # stdin: readline redraws keystrokes that raw mode stopped the driver
+      # from echoing, and the leak simply does not occur when answers arrive
+      # from a pipe — so a check driven any other way passes while every
+      # credential and pasted private key is printed to the screen.
+      - name: The setup wizard must not echo secrets
+        run: python3 scripts/check-no-secret-echo.py
+
       - name: Boot the built server from another directory
         # Deliberately not run from the repository root. The bundle resolves its
         # migrations from paths relative to itself and to the working directory,

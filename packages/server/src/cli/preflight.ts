@@ -149,10 +149,18 @@ async function main(): Promise<void> {
           return null;
         });
         if (onChain !== null) {
-          if (onChain <= floorLamports) {
+          /*
+           * The floor is applied *after* the spend, not before it.
+           * `checkSpend` subtracts one launch's reserved cost and then compares
+           * the remainder against the floor, so a balance merely above the
+           * floor still refuses every launch — 0.051 SOL against a 0.05 floor
+           * looked fine here and could not launch anything.
+           */
+          const needed = floorLamports + container.guard.estimatedLaunchCostLamports();
+          if (onChain < needed) {
             block(
               'Wallet balance',
-              `${lamportsToSol(onChain).toFixed(4)} SOL on mainnet is at or below the ${settings.limits.walletBalanceFloorSol} SOL floor, so every launch would be refused.`,
+              `${lamportsToSol(onChain).toFixed(4)} SOL on mainnet. One launch reserves ${lamportsToSol(container.guard.estimatedLaunchCostLamports()).toFixed(4)} SOL and the floor holds back ${settings.limits.walletBalanceFloorSol} SOL, so at least ${lamportsToSol(needed).toFixed(4)} SOL is needed before anything can launch.`,
             );
           } else {
             const usable = lamportsToSol(onChain) - settings.limits.walletBalanceFloorSol;
@@ -168,6 +176,24 @@ async function main(): Promise<void> {
       block('Emergency stop', `Engaged: ${settings.emergencyStopReason || 'no reason recorded'}. Nothing will run until it is released.`);
     } else {
       pass('Emergency stop', 'not engaged');
+    }
+
+    /*
+     * Releasing the emergency stop does not clear the failure breaker.
+     * They are separate routes, and `checkLaunch` refuses every launch while
+     * the consecutive-failure count is at its threshold — so an operator who
+     * released the stop and stopped there had a platform that would launch
+     * nothing, and a gate that said no blockers.
+     */
+    const failures = container.guard.consecutiveLaunchFailures();
+    const threshold = settings.limits.consecutiveFailureShutdown;
+    if (failures >= threshold) {
+      block(
+        'Failure breaker',
+        `${failures} consecutive launch failures at a threshold of ${threshold}. Every launch is refused until they are acknowledged (POST /api/system/clear-launch-failures); releasing the emergency stop does not clear this.`,
+      );
+    } else {
+      pass('Failure breaker', `${failures} consecutive failures, threshold ${threshold}`);
     }
 
     /*

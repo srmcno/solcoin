@@ -120,3 +120,59 @@ describe('the model sample count', () => {
     expect(bundle.trainedOnSamples).toBeUndefined();
   });
 });
+
+describe('the balance gate leaves room for a launch', () => {
+  /**
+   * The floor is applied *after* the spend: `checkSpend` subtracts one
+   * launch's reserved cost and compares the remainder against the floor. A
+   * balance merely above the floor therefore refuses every launch — 0.051 SOL
+   * against a 0.05 floor read as fine and could not launch anything.
+   */
+  it('agrees with the guard about what a launch needs', () => {
+    const floorSol = harness.settings.get().limits.walletBalanceFloorSol;
+    const launchCost = harness.guard.estimatedLaunchCostLamports();
+    const floorLamports = floorSol * 1e9;
+
+    // Just above the floor, but with no room for the launch itself.
+    const justOverFloor = floorLamports + 1_000;
+    expect(harness.guard.checkSpend({ operation: 'launch', lamports: launchCost, walletBalanceLamports: justOverFloor }).allowed).toBe(
+      false,
+    );
+
+    // The threshold preflight now requires.
+    const enough = floorLamports + launchCost;
+    expect(harness.guard.checkSpend({ operation: 'launch', lamports: launchCost, walletBalanceLamports: enough }).allowed).toBe(true);
+  });
+});
+
+describe('the consecutive-failure breaker', () => {
+  /**
+   * Releasing the emergency stop and clearing the failure count are separate
+   * routes. `checkLaunch` refuses every launch while the count is at its
+   * threshold, so an operator who released the stop and stopped there had a
+   * platform that would launch nothing and a gate that reported no blockers.
+   */
+  it('refuses launches while it is tripped, with the stop released', () => {
+    const threshold = harness.settings.get().limits.consecutiveFailureShutdown;
+    const at = harness.clock.now();
+    for (let i = 0; i < threshold; i++) {
+      harness.db.$raw
+        .prepare(
+          `INSERT INTO concepts (id, name, symbol, description, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
+        )
+        .run(`cpt_f${i}`, `Concept ${i}`, 'CPT', 'a concept used in a breaker test', 'failed', at + i, at + i);
+      harness.db.$raw
+        .prepare(
+          `INSERT INTO launches (id, concept_id, idempotency_key, network, adapter, status, approval_mode, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(`lch_f${i}`, `cpt_f${i}`, `k${i}`, 'simulation', 'simulation', 'failed', 'manual', at + i, at + i);
+    }
+
+    expect(harness.settings.get().emergencyStop).toBe(false);
+    expect(harness.guard.consecutiveLaunchFailures()).toBeGreaterThanOrEqual(threshold);
+    const decision = harness.guard.checkLaunch(5_000_000_000);
+    expect(decision.allowed).toBe(false);
+    expect(decision.code).toBe('consecutive_failures');
+  });
+});

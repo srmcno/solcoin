@@ -44,7 +44,21 @@ const R = sgr('31');
 const C = sgr('36');
 const X = sgr('0');
 
-const rl = createInterface({ input: stdin, output: stdout });
+/*
+ * `terminal: false` is load-bearing, not a style choice.
+ *
+ * A readline interface in terminal mode does its own line editing and echoes
+ * every keystroke to its output. Raw mode turns off the *terminal driver's*
+ * echo, but readline keeps redrawing the input itself — so the no-echo secret
+ * prompt below printed every credential, and every pasted wallet private key,
+ * straight to the terminal while promising it was hidden. Pausing the
+ * interface is not enough; it still echoes.
+ *
+ * With terminal mode off, readline never writes input back. Visible prompts
+ * still show what is typed, because in cooked mode the terminal driver echoes
+ * them, and in raw mode it does not — which is exactly the behaviour wanted.
+ */
+const rl = createInterface({ input: stdin, output: stdout, terminal: false });
 
 function heading(title: string): void {
   stdout.write(`\n${B}${title}${X}\n${D}${'─'.repeat(Math.min(title.length + 8, 60))}${X}\n`);
