@@ -49,11 +49,11 @@
     </div>
 
     <div class="stats">
-      <div class="stat"><span class="n">63,750</span><span class="k">lines of TypeScript</span></div>
-      <div class="stat"><span class="n">275</span><span class="k">tests, 18 files</span></div>
+      <div class="stat"><span class="n">64,907</span><span class="k">lines of TypeScript</span></div>
+      <div class="stat"><span class="n">318</span><span class="k">tests, 22 files</span></div>
       <div class="stat"><span class="n">37</span><span class="k">SQLite tables</span></div>
       <div class="stat"><span class="n">16</span><span class="k">scheduled jobs</span></div>
-      <div class="stat"><span class="n">42</span><span class="k">defects found &amp; fixed</span></div>
+      <div class="stat"><span class="n">59</span><span class="k">defects found &amp; fixed</span></div>
     </div>
   </div>
 </section>
@@ -307,6 +307,32 @@
     </div>
 
     <div class="prose" style="margin-top:2.5rem">
+      <h3>The argument that decides whether a token can earn</h3>
+      <p>
+        Pump.fun creates a coin as either a <em>Creator Fee</em> coin or a
+        <em>Cashback</em> coin, and the choice is locked permanently at
+        creation. Under cashback, the whole 0.30% creator share of every
+        bonding-curve trade is redirected to the traders who made it — the
+        creator earns nothing on the curve, ever.
+      </p>
+      <p>
+        Verified on chain in both directions: a cashback coin's creator vault
+        stayed flat across six consecutive trades by four traders while their
+        accumulators took exactly 30.00 basis points; an ordinary creator-fee
+        coin's vault received exactly 30.00 basis points from two independent
+        buyers.
+      </p>
+      <p>
+        The launch adapter passes <code>cashback: false</code> explicitly, and a
+        test fails the build if that argument is ever dropped. The SDK happens
+        to default it correctly today, which is not a reason to omit it: a
+        default that flipped in a dependency upgrade would make every future
+        launch permanently unable to earn, with nothing failing and nothing
+        visible in a diff.
+      </p>
+    </div>
+
+    <div class="prose" style="margin-top:2.5rem">
       <h3>Two creator-fee vaults, not one</h3>
       <p>
         The bonding curve and the AMM use different PDA seeds — <code>creator-vault</code>
@@ -323,11 +349,13 @@
   <div class="wrap">
     <div class="prose">
       <span class="eyebrow">Review history</span>
-      <h2>Forty-two defects, and what they were</h2>
+      <h2>Fifty-nine defects, and what they were</h2>
       <p class="lede">
-        Seven rounds of automated review found thirty-four; five self-audits found eight
-        more. All were reproduced before being fixed, and each fix carries a regression
-        test that was run against the pre-fix code to confirm it fails there.
+        Twelve rounds of automated review across the platform and the operator
+        tooling, plus repeated self-audits. All were reproduced before being fixed,
+        and each fix carries a regression test that was run against the pre-fix
+        code to confirm it actually fails there — a discipline that caught three
+        tests which passed against code known to be broken.
       </p>
     </div>
 
@@ -400,7 +428,7 @@
       </div>
       <div class="status-row">
         <span class="badge yes">Working</span>
-        <span>Typecheck, lint, 275 tests and a production build all pass in CI, which then boots the built server and waits for it to serve a request.</span>
+        <span>Typecheck, lint, 318 tests and a production build all pass in CI, which then boots the built server from a directory that is not the repository root and waits for it to serve a request.</span>
       </div>
       <div class="status-row">
         <span class="badge no">Not done</span>
