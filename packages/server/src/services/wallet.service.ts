@@ -33,6 +33,17 @@ import type { SettingsService } from './settings.service.js';
  * it can redirect every future sweep.
  */
 
+/**
+ * Is a cached balance too old to make a spending decision on?
+ *
+ * A balance that was never fetched is stale by definition: the cache reads
+ * it as zero, and zero is not a measurement.
+ */
+export function balanceIsStale(checkedAt: number | null | undefined, nowMs: number, maxAgeMs: number): boolean {
+  if (checkedAt === null || checkedAt === undefined) return true;
+  return nowMs - checkedAt > maxAgeMs;
+}
+
 export interface WalletSummary {
   address: string | null;
   role: string;

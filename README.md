@@ -97,8 +97,10 @@ Open <http://127.0.0.1:4317> and create the owner account.
 
 That is the whole setup. **No API keys are required to get useful output.** Six
 trend sources work with no credentials at all (Google Trends, Bluesky, Mastodon,
-Wikipedia, Hacker News, Stack Exchange), as do three market-data sources (Jupiter,
-DexScreener, the pump.fun API). The platform starts in simulation mode on
+Wikipedia, Hacker News, Stack Exchange), as do four market-data sources (Jupiter,
+DexScreener, the pump.fun API, and the bonding-curve accounts read straight from
+RPC, which is what answers on devnet and for a mint no aggregator has indexed
+yet). The platform starts in simulation mode on
 `phase1_research`, so it discovers and scores real opportunities immediately
 while broadcasting nothing.
 
@@ -145,6 +147,12 @@ Devnet is genuinely useful here: the Pump programs are deployed on devnet at the
 identical addresses, so the whole launch path can be exercised for free. Note
 that devnet bonding-curve reserves differ from mainnet, so devnet pricing and
 market-cap figures will not match mainnet.
+
+`npm run rehearsal` is phase two as a single command: it drives the platform's
+own services through a real `create_v2` launch, on-chain verification,
+monitoring pickup, fee accrual and a fee claim on devnet, and reports every
+signature. It establishes the cluster from the chain's genesis hash and refuses
+anything but devnet. See `docs/going-live.md` §4.
 
 ---
 

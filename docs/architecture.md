@@ -72,7 +72,8 @@ build.
                                      │
  jupiter        ┐        market-scan │  MarketProvider.recentLaunches()
  dexscreener    ├──────▶ (900 s) ────┼─▶ market_snapshots, competitor_tokens
- pump.fun API   ┘                    │
+ pump.fun API   │                    │
+ on-chain curve ┘  (RPC; last resort, and the only one that answers on devnet)
                                      ▼
                          candidate-pipeline (1800 s)  ── PipelineService.run()
                                      │
@@ -502,10 +503,19 @@ broken; a provider that says "add a YouTube API key" is actionable.
 
 Construction is individually guarded. `attempt(name, factory)` catches, logs and
 returns `null`, so one bad constructor cannot stop the platform booting with the
-rest — ten trend providers, three market providers, two AI providers and the
-image provider are each built behind their own `attempt`. The same principle
-appears at the container level: a failure building the on-chain launch adapter
-degrades to simulation rather than aborting startup.
+rest — ten trend providers, three indexer market providers, two AI providers
+and the image provider are each built behind their own `attempt`. The same
+principle appears at the container level: a failure building the on-chain launch
+adapter degrades to simulation rather than aborting startup.
+
+The fourth market provider is built by the container rather than here, because
+it needs the RPC pool: `providers/market/onchain-curve.ts` reads bonding-curve
+accounts directly and derives price, market cap, curve progress and graduation
+from the reserves. It is appended after the indexers, so on mainnet their fuller
+answer (holders, volume) wins and the chain fills in only for a mint they have
+not seen; on devnet, which no indexer covers, it is the provider that answers.
+What the curve cannot tell — holders, volume, trade counts — it leaves undefined
+rather than guessing.
 
 One caveat on "every provider": `buildAllProviders()` constructs every provider
 it imports, and `providers/market/pumpportal-stream.ts` is not one of them. That

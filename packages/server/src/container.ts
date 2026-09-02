@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { DEFAULT_ECONOMICS, estimateAmmCreatorFeeBps, type ExecutionNetwork } from '@solcoin/shared';
+import { DEFAULT_ECONOMICS, TIME, estimateAmmCreatorFeeBps, type ExecutionNetwork } from '@solcoin/shared';
 import type { Env } from './config/env.js';
 import { openDatabase, type Db } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
@@ -16,6 +16,7 @@ import { PumpFunLaunchAdapter } from './providers/solana/pumpfun-adapter.js';
 import { SimulationLaunchAdapter } from './providers/solana/simulation-adapter.js';
 import type { LaunchAdapter } from './providers/solana/launch-adapter.js';
 import { ChainedMetadataStorage, PinataIpfsProvider, PumpFunIpfsProvider } from './providers/storage/ipfs.js';
+import { createOnChainCurveProvider } from './providers/market/onchain-curve.js';
 import type { ImageProvider, MarketProvider, Provider, TrendProvider } from './providers/types.js';
 import { SettingsService } from './services/settings.service.js';
 import { GuardService } from './services/guard.service.js';
@@ -29,7 +30,7 @@ import { ArtworkService } from './services/artwork.service.js';
 import { LaunchService, type LaunchOutcome } from './services/launch.service.js';
 import { MonitoringService } from './services/monitoring.service.js';
 import { FeeService } from './services/fee.service.js';
-import { WalletService } from './services/wallet.service.js';
+import { WalletService, balanceIsStale } from './services/wallet.service.js';
 import { PipelineService } from './services/pipeline.service.js';
 import { JobScheduler } from './jobs/scheduler.js';
 
@@ -472,6 +473,23 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     state.trendProviders = built.trendProviders;
     state.marketProviders.length = 0;
     state.marketProviders.push(...built.marketProviders);
+    /*
+     * The chain itself, as the market provider of last resort.
+     *
+     * The indexers above are richer and go first, so on mainnet their answer
+     * wins. But none of them sees a mint in its first minutes, none of them
+     * answers during its own outage, and none of them indexes devnet at all —
+     * which meant a token the platform had just created could be invisible
+     * to its own monitor. Reading the bonding curve from RPC closes that gap
+     * with what the curve alone can say: price, market cap, progress and
+     * whether it graduated. Holders and volume stay unknown rather than made
+     * up.
+     */
+    if (state.rpc && network !== 'simulation') {
+      state.marketProviders.push(
+        createOnChainCurveProvider({ rpc: state.rpc, network, solPriceUsd: built.solPriceUsd, now }),
+      );
+    }
     state.imageProvider = built.imageProvider;
     state.aiRouter = built.aiRouter;
 
@@ -481,7 +499,7 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
     (artwork as unknown as { imageProvider: ImageProvider | null }).imageProvider = built.imageProvider;
     (wallet as unknown as { rpc: SolanaRpc | null }).rpc = state.rpc;
 
-    health.register([...built.trendProviders, ...built.marketProviders, ...built.aiProviders, storage]);
+    health.register([...built.trendProviders, ...state.marketProviders, ...built.aiProviders, storage]);
 
     log.info(
       {
@@ -548,7 +566,26 @@ export async function createContainer(options: ContainerOptions): Promise<AppCon
       const concept = await concepts.getById(conceptId);
       if (!concept) throw new AppError('not_found', 'No such candidate.');
       const network = settings.get().execution.network;
-      const balance = (await wallet.summary()).balanceLamports;
+
+      /*
+       * The launch gate applies the balance floor to whatever balance is
+       * cached, and the cache is written by a job that runs every ten
+       * minutes. A wallet funded since then — or one never queried at all,
+       * which reads as zero — was refused with "would take the wallet below
+       * its reserve" while holding plenty. Asking the chain when the figure
+       * is more than a couple of minutes old costs one RPC read per launch
+       * and makes the gate judge the balance the wallet actually has.
+       */
+      let summary = await wallet.summary();
+      if (network !== 'simulation' && balanceIsStale(summary.balanceCheckedAt, now(), 2 * TIME.minute)) {
+        await wallet
+          .refreshBalances()
+          .catch((e: unknown) =>
+            log.warn({ err: safeErrorText(e, 160) }, 'could not refresh the wallet balance before launching; using the cached figure'),
+          );
+        summary = await wallet.summary();
+      }
+      const balance = summary.balanceLamports;
 
       /*
        * The prediction the pipeline made for this concept, carried onto the
@@ -870,6 +907,7 @@ async function buildDataProviders(deps: {
   aiProviders: Provider[];
   imageProvider: ImageProvider | null;
   aiRouter: unknown;
+  solPriceUsd: () => Promise<number | null>;
 }> {
   const log = componentLogger('providers');
   const trendProviders: TrendProvider[] = [];
@@ -899,5 +937,5 @@ async function buildDataProviders(deps: {
   aiRouter = built.aiRouter;
   void load;
 
-  return { trendProviders, marketProviders, aiProviders, imageProvider, aiRouter };
+  return { trendProviders, marketProviders, aiProviders, imageProvider, aiRouter, solPriceUsd: built.solPriceUsd };
 }

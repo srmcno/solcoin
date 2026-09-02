@@ -193,7 +193,8 @@ be present:
   all of them are zero-auth. Two more zero-auth sources (`stackexchange`, `rss`)
   ship disabled and cost nothing to turn on.
 - **Market data** needs no credential — Jupiter, DexScreener and the pump.fun API
-  are all keyless. Jupiter additionally looks for a `market.jupiter.api_key`
+  are all keyless, and on devnet or mainnet the bonding-curve accounts are also
+  read straight from RPC as a last resort. Jupiter additionally looks for a `market.jupiter.api_key`
   secret and switches to its paid tier and rate limit when it finds one; that key
   is not declared in `SECRET_KEYS`, so it does not appear in the Providers UI and
   has to be stored through `PUT /api/system/secrets/market.jupiter.api_key`.

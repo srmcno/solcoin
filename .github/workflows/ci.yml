@@ -62,6 +62,27 @@ jobs:
       - name: The setup wizard must not echo secrets
         run: python3 scripts/check-no-secret-echo.py
 
+      # The rehearsal is the phase-two gate, and it ships as its own bundle.
+      # It cannot get devnet SOL here, but its refusals are deterministic and
+      # run before any network call: no master key must exit 2 with a reason,
+      # and --help must exit 0. A bundle that dies at import time fails both.
+      - name: The rehearsal bundle boots and refuses correctly
+        run: |
+          set -uo pipefail
+          repo="$PWD"
+          mkdir -p "$RUNNER_TEMP/rehearsal" && cd "$RUNNER_TEMP/rehearsal"
+          node "$repo/packages/server/dist/cli/rehearsal.js" --help | grep -q 'prove the launch and creator-fee path'
+          set +e
+          output=$(node "$repo/packages/server/dist/cli/rehearsal.js" 2>&1)
+          code=$?
+          set -e
+          echo "$output" | tail -3
+          test "$code" -eq 2 || { echo "expected exit 2 without a master key, got $code" >&2; exit 1; }
+          echo "$output" | grep -q 'SOLCOIN_MASTER_KEY is not set'
+        env:
+          DATABASE_PATH: ./rehearsal-check.db
+          DATA_DIR: .
+
       - name: Boot the built server from another directory
         # Deliberately not run from the repository root. The bundle resolves its
         # migrations from paths relative to itself and to the working directory,

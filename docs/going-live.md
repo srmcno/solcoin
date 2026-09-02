@@ -239,8 +239,9 @@ Four things cannot be automated, because they are accounts, money and consent.
 
 Optional, and genuinely optional: an OpenAI key (a second opinion in the
 concept panel, and the only source of generated artwork — without it artwork
-falls back to a deterministic procedural image), a YouTube key, Reddit app
-credentials, a Pinata JWT.
+falls back to a deterministic procedural image, which pump.fun's metadata
+uploader has been verified to accept), a YouTube key, Reddit app credentials,
+a Pinata JWT.
 
 ---
 
@@ -297,6 +298,59 @@ Spend real time in phases 1 and 2. Everything expensive that can go wrong is
 cheaper to find on devnet, and the platform is designed so devnet exercises the
 identical code path.
 
+### Phase 2 in one command
+
+```bash
+npm run rehearsal --enter-devnet
+```
+
+`npm run rehearsal` is phase two's checklist, executed rather than read. It
+runs the platform's own services — the same keystore, guard, launch service,
+adapter, monitor and fee service that mainnet will use — against the real
+Pump.fun program on devnet, and reports each step with the transaction
+signature and an explorer link:
+
+1. confirms the RPC is devnet by **genesis hash**, not by its URL or a setting
+2. reads the program's global and fee-config accounts and the creator-fee rate
+   a new curve actually pays there (devnet's tier table has been observed to
+   differ from its global flat rate)
+3. checks the limits permit a launch and that the wallet can sign, creating an
+   operating wallet if there is none
+4. checks the balance covers the run and asks the devnet faucet if not; when
+   the faucet is dry it prints the address, points at
+   [faucet.solana.com](https://faucet.solana.com), and exits with code 3
+5. inserts a fixture concept that passes the same safety screen a generated
+   one must, and hosts its artwork and metadata for real (pump.fun's uploader
+   accepts the procedural SVG, so no image key is needed for a launch)
+6. launches it through `launchApproved`, so the idempotency key, the spend
+   reservation, `create_v2`, the signature-before-broadcast record and the
+   monitoring registration all happen as they would on mainnet
+7. reads the mint and bonding-curve accounts back and checks the curve's
+   creator is the operating wallet and the coin is a creator-fee coin
+8. polls the token through the monitor; on devnet the on-chain curve reader
+   is the provider that answers, since no aggregator indexes devnet
+9. makes a **protocol test buy** of its own token, sized from the live fee
+   rate so the curve vault ends above its stranded rent, and records it as an
+   expense and in the audit log — this is the one action that would be
+   self-trading on a real market, which is why the cluster is re-checked by
+   genesis hash immediately before signing it and the platform proper has no
+   such path at all
+10. snapshots the vaults through the fee service, reports what the scheduled
+    collector would decide, and claims through `FeeService.collect`, then
+    verifies the wallet moved and the vault is back at its rent floor
+
+`--skip-buy` stops after monitoring; `--skip-claim` after the snapshot;
+`--buy-sol` overrides the sized buy. Every run is written to
+`data/rehearsal/<timestamp>.json`. Exit codes: 0 every step passed, 1 a step
+failed, 2 it refused to start, 3 blocked on devnet SOL.
+
+It refuses to run on, or to move, a platform that is on mainnet. With
+`--enter-devnet` it moves a phase-one platform to phase two and selects
+devnet; it never goes higher. Run it with the server stopped, or accept that
+the platform is on devnet afterwards, which is where phase two lives anyway.
+
+A run that passes proves the code path, not the strategy.
+
 ---
 
 ## 5. Before mainnet
@@ -337,6 +391,24 @@ The shipped defaults are deliberately timid:
 Raise them slowly and for a reason. Every one of them is enforced atomically —
 concurrent launches cannot each clear a cap their sum exceeds — so a limit you
 set is a limit that holds.
+
+### Claiming what it earns
+
+Creator fees accrue in two on-chain vaults per wallet, not per token. The
+platform reads them every ten minutes and records a snapshot; the Fees page
+shows the claimable balance (the curve vault keeps 0.00089 SOL of rent forever,
+so it is always a little less than the vault) and what the scheduled collector
+would decide right now, with its reason.
+
+Until phase four, `autonomy.fee_collection` cannot be `auto` — the ladder gates
+unattended transactions of every kind — so in phase three the claim is yours
+to trigger, from the Fees page or `POST /api/fees/collect`. It goes through
+the same `FeeService.collect` the job uses: it refuses a claim that would cost
+more than it recovers, reserves the fee against the spend caps, records the
+signature before broadcasting, and attributes the proceeds back to the tokens
+that earned them. From phase four set `autonomy.fee_collection` to `auto` and
+the hourly job takes over, subject to `fees.collectionThresholdSol`,
+`fees.minCollectionValueRatio` and `fees.minHoursBetweenCollections`.
 
 ---
 
