@@ -71,7 +71,8 @@ jobs:
           set -uo pipefail
           repo="$PWD"
           mkdir -p "$RUNNER_TEMP/rehearsal" && cd "$RUNNER_TEMP/rehearsal"
-          node "$repo/packages/server/dist/cli/rehearsal.js" --help | grep -q 'prove the launch and creator-fee path'
+          help=$(node "$repo/packages/server/dist/cli/rehearsal.js" --help)
+          echo "$help" | grep -q 'prove the launch and creator-fee path'
           set +e
           output=$(node "$repo/packages/server/dist/cli/rehearsal.js" 2>&1)
           code=$?

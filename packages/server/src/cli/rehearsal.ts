@@ -64,6 +64,17 @@ const X = sgr('0');
 
 const out = (line = ''): void => void process.stdout.write(`${line}\n`);
 
+/*
+ * `npm run rehearsal | head` closes stdout early. Node reports that as an
+ * 'error' event on the stream, and an unhandled one turns a report that was
+ * cut short on purpose into a stack trace and exit code 1. The reader chose
+ * to stop; leave quietly.
+ */
+process.stdout.on('error', (e: NodeJS.ErrnoException) => {
+  if (e.code === 'EPIPE') process.exit(0);
+  throw e;
+});
+
 const steps: RehearsalStep[] = [];
 
 function record(step: RehearsalStep): void {
