@@ -25,7 +25,8 @@
     "lint": "eslint packages tests --max-warnings 0",
     "format": "prettier --write \"packages/**/*.{ts,tsx,json,css,md}\"",
     "doctor": "node packages/server/dist/cli/doctor.js",
-    "preflight": "npm run build && node packages/server/dist/cli/preflight.js"
+    "preflight": "npm run build && node packages/server/dist/cli/preflight.js",
+    "rehearsal": "npm run build && node packages/server/dist/cli/rehearsal.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

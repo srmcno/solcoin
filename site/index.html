@@ -49,8 +49,8 @@
     </div>
 
     <div class="stats">
-      <div class="stat"><span class="n">64,907</span><span class="k">lines of TypeScript</span></div>
-      <div class="stat"><span class="n">321</span><span class="k">tests, 22 files</span></div>
+      <div class="stat"><span class="n">66,067</span><span class="k">lines of TypeScript</span></div>
+      <div class="stat"><span class="n">352</span><span class="k">tests, 24 files</span></div>
       <div class="stat"><span class="n">37</span><span class="k">SQLite tables</span></div>
       <div class="stat"><span class="n">16</span><span class="k">scheduled jobs</span></div>
       <div class="stat"><span class="n">59</span><span class="k">defects found &amp; fixed</span></div>
@@ -462,7 +462,11 @@
       </div>
       <div class="status-row">
         <span class="badge yes">Working</span>
-        <span>Typecheck, lint, 321 tests and a production build all pass in CI, which then boots the built server from a directory that is not the repository root and waits for it to serve a request.</span>
+        <span>Typecheck, lint, 352 tests and a production build all pass in CI, which then boots the built server from a directory that is not the repository root and waits for it to serve a request.</span>
+      </div>
+      <div class="status-row">
+        <span class="badge yes">Working</span>
+        <span><code>npm run rehearsal</code> drives the platform's own services through a real <code>create_v2</code> launch, on-chain verification, monitoring pickup, a fee-accrual snapshot and a fee claim against the Pump.fun program on devnet, reporting every signature. It establishes the cluster from the genesis hash and refuses anything but devnet. Metadata hosting through pump.fun's uploader and the program's live fee-config read have been exercised for real from this environment; the transaction steps need devnet SOL, which the public faucet was refusing when this page was written.</span>
       </div>
       <div class="status-row">
         <span class="badge no">Not done</span>
@@ -496,7 +500,10 @@ npm run db:migrate
 npm run dev
 
 <span class="c"># check which providers actually answered</span>
-npm run build &amp;&amp; npm run doctor</code></pre>
+npm run build &amp;&amp; npm run doctor
+
+<span class="c"># phase two: prove the launch and fee-claim path on devnet, with worthless SOL</span>
+npm run rehearsal -- --enter-devnet</code></pre>
 
     <div class="prose" style="margin-top:1.5rem">
       <p style="font-size:0.875rem;color:var(--text-faint)">

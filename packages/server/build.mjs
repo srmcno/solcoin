@@ -28,6 +28,7 @@ const options = {
     resolve(here, 'src/cli/migrate.ts'),
     resolve(here, 'src/cli/setup.ts'),
     resolve(here, 'src/cli/preflight.ts'),
+    resolve(here, 'src/cli/rehearsal.ts'),
   ],
   outdir: resolve(here, 'dist'),
   bundle: true,
