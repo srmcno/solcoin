@@ -1,22 +1,53 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
-# CodeRabbit reviews, made independent of the default-branch setting.
+# CodeRabbit reviews, and why this file has to exist.
 #
-# CodeRabbit auto-reviews only pull requests whose BASE is the repository's
-# default branch, unless that set is widened here. This repository's default
-# branch is currently a feature branch rather than `main`, so every pull
-# request opened against `main` — which is all of them — was answered with
-# "Review skipped: auto reviews are disabled on base/target branches other
-# than the default branch" and reviewed by nobody. The bot looked present and
-# did nothing, which is worse than an absent one.
+# Until this was added, CodeRabbit commented on every pull request here and
+# reviewed none of them:
 #
-# Naming `main` here fixes that whichever branch GitHub considers default, so
-# correcting the setting later cannot silently switch reviews back off.
+#   "Review skipped — auto reviews are disabled on base/target branches
+#    other than the default branch."
+#
+# The cause is a repository setting, not a CodeRabbit fault. This repository's
+# default branch is `claude/autonomous-token-launch-platform-i8i4fa` rather
+# than `main`, and CodeRabbit auto-reviews only pull requests whose base is the
+# default branch unless that set is widened. Every pull request here targets
+# `main`, so every one was skipped. A bot that comments on each pull request
+# while reviewing none of them is worse than an absent one, because the comment
+# reads as coverage.
+#
+# `base_branches` below is documented in schema.v2.json as "Base branches
+# (other than the default branch) to review", which is exactly the gap.
+#
+# WHICH BRANCH THIS FILE IS READ FROM, stated carefully because a P1 review
+# finding on the pull request that added it asserted the opposite:
+#
+#   CodeRabbit's documentation says "the configuration present in the feature
+#   branch under review will be automatically detected and used by CodeRabbit
+#   for that review" — the head of the pull request, not the default branch.
+#   The finding claimed repository configuration is loaded from the default
+#   branch, and concluded that a copy living only on `main` could not take
+#   effect.
+#
+#   Both readings are satisfied here and neither has been isolated by
+#   experiment, because in this repository the default branch and the head of
+#   every pull request are the SAME branch — so the file is necessarily on
+#   both, and no observation so far distinguishes the two rules.
+#
+#   The practical consequence is the same under either: while the default
+#   branch is a feature branch, this file must stay on that branch as well as
+#   on `main`. Deleting or resetting the feature branch after a merge — an
+#   ordinary thing to do — would remove the copy the default-branch reading
+#   depends on, and reviews would silently stop again.
+#
+# Setting the default branch to `main` (Settings → General) removes the
+# ambiguity and the fragility together, and makes this file merely correct
+# rather than load-bearing.
 language: en-US
 
 reviews:
   # Keep the walkthrough and the status comment: the "review skipped" notice is
-  # how this was noticed at all.
+  # how the problem above was noticed at all.
   review_status: true
   auto_review:
     enabled: true
