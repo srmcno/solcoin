@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reviews, made independent of the default-branch setting.
+#
+# CodeRabbit auto-reviews only pull requests whose BASE is the repository's
+# default branch, unless that set is widened here. This repository's default
+# branch is currently a feature branch rather than `main`, so every pull
+# request opened against `main` — which is all of them — was answered with
+# "Review skipped: auto reviews are disabled on base/target branches other
+# than the default branch" and reviewed by nobody. The bot looked present and
+# did nothing, which is worse than an absent one.
+#
+# Naming `main` here fixes that whichever branch GitHub considers default, so
+# correcting the setting later cannot silently switch reviews back off.
+language: en-US
+
+reviews:
+  # Keep the walkthrough and the status comment: the "review skipped" notice is
+  # how this was noticed at all.
+  review_status: true
+  auto_review:
+    enabled: true
+    # In addition to the default branch, not instead of it.
+    base_branches:
+      - main
+    # A draft is still being written; reviewing it wastes the author's
+    # attention and the bot's budget.
+    drafts: false
