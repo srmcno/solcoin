@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [claude/autonomous-token-launch-platform-i8i4fa]
   pull_request:
 
 # A second push to the same branch makes the first run's result irrelevant.

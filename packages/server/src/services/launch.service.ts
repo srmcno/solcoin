@@ -152,6 +152,9 @@ export class LaunchService {
     const preflight = this.guard.checkLaunch(options.walletBalanceLamports);
     if (!preflight.allowed) return recordBlocked(preflight);
 
+    const evidence = this.guard.checkLaunchEvidence(input.conceptId);
+    if (!evidence.allowed) return recordBlocked(evidence);
+
     const adapter = this.adapterFor(network);
     const readiness = await adapter.ready();
     if (!readiness.ready) {
@@ -160,6 +163,8 @@ export class LaunchService {
       });
     }
 
+    const refreshedEvidence = this.guard.checkLaunchEvidence(input.conceptId);
+    if (!refreshedEvidence.allowed) return recordBlocked(refreshedEvidence);
     const launchId = newId('lch', this.now());
 
     /*
@@ -310,6 +315,14 @@ export class LaunchService {
             launchId,
           );
 
+        if (this.settings.get().execution.network !== network) {
+          throw new AppError('forbidden', 'Execution network changed while preparing the launch.');
+        }
+        const operational = this.guard.checkOperational('launch');
+        const currentEvidence = this.guard.checkLaunchEvidence(input.conceptId);
+        if (!operational.allowed || !currentEvidence.allowed) {
+          throw new AppError('forbidden', operational.reason ?? currentEvidence.reason ?? 'Launch no longer permitted.');
+        }
         return adapter.execute(plan, payer, {
           signal: options.signal,
           // Persisting the signature before the first broadcast is what makes

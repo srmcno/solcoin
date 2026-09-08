@@ -1,5 +1,7 @@
 # Solcoin
 
+**September update:** [Decision integrity, aggressive research preset, and U.S. operating requirements](docs/release-2026-09.md).
+
 An autonomous research platform that looks for emerging cultural trends, develops
 original token concepts around the ones that look genuinely underserved, evaluates
 them adversarially, launches the few that survive on Solana via Pump.fun, monitors

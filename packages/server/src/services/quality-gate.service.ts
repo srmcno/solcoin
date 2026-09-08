@@ -1,4 +1,6 @@
 import {
+  SOURCE_INDEPENDENCE,
+  type TrendSourceId,
   createRng,
   explorationRate,
   hashSeed,
@@ -81,6 +83,9 @@ export class QualityGateService {
     const config = this.settings.get();
     const gate = config.qualityGate;
     const exploration = config.exploration;
+    const sourceFamilies = new Set(input.trend.sources.map(source =>
+      Object.hasOwn(SOURCE_INDEPENDENCE, source) ? SOURCE_INDEPENDENCE[source as TrendSourceId].family : null,
+    ).filter((family): family is string => family !== null));
 
     const checks: GateDecision['checks'] = [];
     const hardFailures: Array<{ reason: RejectionReason; detail: string }> = [];
@@ -130,6 +135,14 @@ export class QualityGateService {
         detail: `The trend is ${input.trend.ageHours.toFixed(1)}h old, beyond the ${gate.maxTrendAgeHours}h window where an early launch still has an advantage.`,
       });
     }
+
+    const observationAgeMinutes = (this.now() - input.trend.lastSeenAt) / 60_000;
+    const observationFresh = Number.isFinite(observationAgeMinutes) &&
+      observationAgeMinutes >= -2 && observationAgeMinutes <= gate.maxObservationAgeMinutes;
+    checks.push({ name: 'Latest observation', passed: observationFresh,
+      value: Number.isFinite(observationAgeMinutes) ? Number(observationAgeMinutes.toFixed(1)) : 'unknown',
+      threshold: gate.maxObservationAgeMinutes, comparison: 'at most', detail: 'minutes since the latest source observation' });
+    if (!observationFresh) hardFailures.push({ reason: 'trend_expired', detail: 'The latest trend observation is stale, missing, or future-dated. Refresh research before evaluating.' });
 
     if (hardFailures.length > 0) {
       const first = hardFailures[0]!;
@@ -188,11 +201,11 @@ export class QualityGateService {
       {
         check: {
           name: 'Source breadth',
-          passed: input.trend.sourceCount >= gate.minSourceBreadth,
-          value: input.trend.sourceCount,
+          passed: sourceFamilies.size >= gate.minSourceBreadth,
+          value: sourceFamilies.size,
           threshold: gate.minSourceBreadth,
           comparison: 'at least',
-          detail: 'independent platforms confirming the trend',
+          detail: 'distinct source families confirming the trend; correlated platforms count once',
         },
         reason: 'below_opportunity_threshold',
       },
@@ -229,6 +242,14 @@ export class QualityGateService {
       },
     ];
 
+    softChecks.push({
+      check: { name: 'Revenue tail concentration',
+        passed: input.prediction.tailConcentration <= gate.maxTailConcentration,
+        value: Number(input.prediction.tailConcentration.toFixed(3)),
+        threshold: gate.maxTailConcentration, comparison: 'at most',
+        detail: 'Share of forecast revenue from the top 1% of simulated outcomes; exploration does not relax this limit.' },
+      reason: 'below_expected_value',
+    });
     for (const { check } of softChecks) checks.push(check);
 
     const failed = softChecks.find((c) => !c.check.passed);

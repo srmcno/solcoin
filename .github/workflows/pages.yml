@@ -12,7 +12,7 @@ name: Deploy project site
 
 on:
   push:
-    branches: [main]
+    branches: [claude/autonomous-token-launch-platform-i8i4fa]
     paths:
       - 'site/**'
       - '.github/workflows/pages.yml'

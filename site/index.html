@@ -17,6 +17,7 @@
   <div class="wrap">
     <a class="brand" href="#top"><span class="dot" aria-hidden="true"></span>Solcoin</a>
     <nav class="site">
+      <a href="#economics">Economics</a>
       <a href="#pipeline" class="hide-sm">Pipeline</a>
       <a href="#constraints" class="hide-sm">Constraints</a>
       <a href="#architecture" class="hide-xs">Architecture</a>
@@ -49,12 +50,37 @@
     </div>
 
     <div class="stats">
-      <div class="stat"><span class="n">66,067</span><span class="k">lines of TypeScript</span></div>
-      <div class="stat"><span class="n">352</span><span class="k">tests, 24 files</span></div>
-      <div class="stat"><span class="n">37</span><span class="k">SQLite tables</span></div>
-      <div class="stat"><span class="n">16</span><span class="k">scheduled jobs</span></div>
-      <div class="stat"><span class="n">59</span><span class="k">defects found &amp; fixed</span></div>
+      <div class="stat"><span class="n">Research first</span><span class="k">Simulation is the default</span></div>
+      <div class="stat"><span class="n">Fresh evidence</span><span class="k">Observation age checked</span></div>
+      <div class="stat"><span class="n">Bounded risk</span><span class="k">Spend limits and tail controls</span></div>
     </div>
+  </div>
+</section>
+
+<section id="economics">
+  <div class="wrap">
+    <span class="eyebrow">Decision desk · September 2026</span>
+    <h2>What does a launch have to earn?</h2>
+    <p class="lede">Stress the economics before committing funds. This public calculator uses your assumptions; it has no wallet access and does not launch tokens.</p>
+    <div class="desk-grid">
+      <div class="desk-card">
+        <h3>SOL reference</h3><p id="sol-quote" class="quote">Unavailable</p>
+        <p id="quote-status" role="status">Fetching public quote…</p><button id="refresh-quote" type="button">Refresh quote</button>
+        <p class="small">The operating dashboard requires the Solcoin server. This page does not show your private account or research feed.</p>
+      </div>
+      <div class="desk-card">
+        <h3>Creator-fee break-even</h3>
+        <form id="economics-form" class="calculator">
+          <label>Launch cost (SOL)<input name="cost" type="number" min="0" max="1000" step="0.001" value="0.025" required></label>
+          <label>AI + claims + overhead (SOL)<input name="overhead" type="number" min="0" max="1000" step="0.001" value="0.004" required></label>
+          <label>Creator fee (%)<input name="rate" type="number" min="0.001" max="100" step="0.001" value="0.300" required></label>
+          <label>Scenario volume (SOL)<input name="volume" type="number" min="0" max="1000000000" step="0.01" value="5" required></label>
+        </form>
+        <p id="economics-result" role="status"></p><div id="scenario-bars"></div>
+        <p class="small">Net = independent volume × creator fee − all costs. Constant fee scenario only; graduated fees vary by market cap. Costs are editable assumptions, not a current launch quote. <a href="https://pump.fun/docs/fees">Pump fee schedule</a>.</p>
+      </div>
+    </div>
+    <div class="objective"><span class="label">U.S. operating requirements</span><p>Pump.fun commercial use requires written agreement under its terms. Mainnet launches now require explicit eligibility and permission confirmations in Settings. U.S. access alone does not establish legality for a particular token or activity. No MEXC integration or geographic restriction bypass is included. <a href="https://pump.fun/docs/terms-and-conditions">Review current terms</a>.</p></div>
   </div>
 </section>
 
@@ -524,5 +550,6 @@ npm run rehearsal -- --enter-devnet</code></pre>
   </div>
 </footer>
 
+<script src="./lab.js" defer></script>
 </body>
 </html>

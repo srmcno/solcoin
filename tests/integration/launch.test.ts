@@ -307,3 +307,21 @@ function deriveDeterministic(key: string): string {
   );
   return Keypair.fromSeed(new Uint8Array(seed)).publicKey.toBase58();
 }
+
+describe('preparation does not freeze permission to execute', () => {
+  it('honors an emergency stop engaged while the adapter prepares', async () => {
+    const prepare = adapter.prepare.bind(adapter);
+    adapter.prepare = async (request, payer) => {
+      const plan = await prepare(request, payer);
+      harness.settings.emergencyStop('Stop during preparation', { type: 'user' });
+      return plan;
+    };
+    let executed = false;
+    const execute = adapter.execute.bind(adapter);
+    adapter.execute = async (...args) => { executed = true; return execute(...args); };
+    const outcome = await service.launch(input('cpt_1'), withSigner);
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toContain('Stop during preparation');
+    expect(executed).toBe(false);
+  });
+});
