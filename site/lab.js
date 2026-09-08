@@ -1,7 +1,7 @@
 const form = document.querySelector('#economics-form');
 const result = document.querySelector('#economics-result');
 function calculate() {
-  if (!form.reportValidity()) { result.textContent = 'Enter valid non-negative costs and a creator fee greater than zero.'; return; }
+  if (!form.checkValidity()) { document.querySelector('#scenario-bars').replaceChildren(); result.textContent = 'Enter valid non-negative costs and a creator fee greater than zero.'; return; }
   const cost = Number(form.elements.namedItem('cost').value);
   const overhead = Number(form.elements.namedItem('overhead').value);
   const rate = Number(form.elements.namedItem('rate').value) / 100;

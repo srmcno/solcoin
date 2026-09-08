@@ -474,3 +474,5 @@ html { scroll-behavior: smooth; scroll-padding-top: 4.5rem; }
 #economics-result { font-weight: 600; }
 :focus-visible { outline: 3px solid var(--accent-text); outline-offset: 3px; }
 @media(max-width: 700px) { .desk-grid, .calculator { grid-template-columns: 1fr; } nav.site { flex-wrap: wrap; } }
+
+@media (prefers-color-scheme: dark) { .loss { color: #ffad9c; } .gain { color: #9ce5be; } }
