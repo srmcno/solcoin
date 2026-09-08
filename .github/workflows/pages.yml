@@ -15,6 +15,7 @@ on:
     branches: [claude/autonomous-token-launch-platform-i8i4fa]
     paths:
       - 'site/**'
+      - 'scripts/build-site.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -72,11 +73,14 @@ jobs:
           MSG
           exit 1
 
+      - name: Fingerprint assets for returning visitors
+        run: python3 scripts/build-site.py
+
       - name: Check every local link resolves
         # A published page with a dead stylesheet or a broken anchor is the
         # static-site version of a button that does nothing.
         run: |
-          cd site
+          cd _site
           status=0
           for href in $(grep -oE '(href|src)="\./[^"]+"' index.html | sed -E 's/.*"\.\/(.*)"/\1/' | sort -u); do
             if [ ! -f "$href" ]; then echo "missing asset: $href"; status=1; fi
@@ -88,7 +92,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: ./site
+          path: ./_site
 
   deploy:
     needs: build
