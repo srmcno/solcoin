@@ -38,6 +38,10 @@ export const QualityGateSettings = z.object({
   minSourceBreadth: z.number().int().min(1).max(10).default(2),
   /** Reject candidates whose trend is older than this. */
   maxTrendAgeHours: z.number().min(1).default(96),
+  /** Reject old observations even when the trend itself is young. */
+  maxObservationAgeMinutes: z.number().min(1).max(1440).default(60),
+  /** Maximum fraction of forecast revenue supplied by its best 1% of draws. */
+  maxTailConcentration: z.number().min(0).max(1).default(0.65),
   /** Block launch entirely when a hard name/ticker collision is detected. */
   blockOnHardCollision: z.boolean().default(true),
   /** Require human review whenever any risk flag fires, even a soft one. */
@@ -182,6 +186,9 @@ export type NotificationSettings = z.infer<typeof NotificationSettings>;
 export const ExecutionSettings = z.object({
   network: ExecutionNetwork.default('simulation'),
   phase: OperatingPhase.default('phase1_research'),
+  /** Operator attestation, not a legal determination or platform permission. */
+  usEligibilityReviewed: z.boolean().default(false),
+  pumpCommercialPermissionConfirmed: z.boolean().default(false),
   /** Optional initial developer buy, in SOL. Zero means create-only. */
   devBuySol: z.number().min(0).max(5).default(0),
   /** Slippage tolerance in basis points for the optional dev buy. */
@@ -232,6 +239,8 @@ export const SENSITIVE_SETTING_PATHS = [
   'autonomy.wallet_transfer',
   'execution.network',
   'execution.phase',
+  'execution.usEligibilityReviewed',
+  'execution.pumpCommercialPermissionConfirmed',
   'execution.devBuySol',
   'limits.maxLaunchesPerDay',
   'limits.maxLaunchesPerHour',

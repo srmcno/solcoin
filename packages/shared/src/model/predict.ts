@@ -88,7 +88,7 @@ export interface EconomicAssumptions {
   candidateCostSol: number;
   /** SOL cost of one fee-collection transaction. */
   feeCollectionCostSol: number;
-  /** Fraction of 24h volume that a *successful* token repeats over its life. */
+  /** Maximum total lifetime volume / day-one volume, including day one. */
   lifetimeVolumeMultiplier: number;
   /** Current SOL price in USD, for reporting only. */
   solPriceUsd: number;
@@ -130,7 +130,7 @@ export interface PredictionResult {
   expectedValueSol: number;
   /** Probability the launch is net-positive after costs. */
   probabilityProfitable: number;
-  /** Fraction of expected value contributed by the top 1% of simulated outcomes. */
+  /** Fraction of net creator-fee revenue contributed by the top 1% of simulated outcomes. */
   tailConcentration: number;
   /** Confidence in the prediction itself, 0..1, based on evidence volume. */
   confidence: number;
@@ -154,6 +154,12 @@ export function predictLaunch(
   economics: EconomicAssumptions = DEFAULT_ECONOMICS,
   seed: string | number = 'prediction',
 ): PredictionResult {
+  for (const [name, value] of Object.entries(economics)) {
+    if (!Number.isFinite(value) || value < 0) throw new RangeError(`Invalid economic assumption: ${name}`);
+  }
+  if (economics.creatorFeeRateCurve > 1 || economics.creatorFeeRateAmm > 1 || economics.lifetimeVolumeMultiplier < 1) {
+    throw new RangeError('Fee rates must be fractions and lifetime volume must include day one.');
+  }
   const { values: x } = encodeFeatures(features);
   const rng = createRng(seed);
 
@@ -245,23 +251,24 @@ function simulateCreatorFees(
       draws[i] = 0;
       continue;
     }
-    // Stage 2: 24h organic volume, conditional on getting a first buyer.
-    // Conditioning shifts the distribution up: the unconditional model already
-    // includes the mass at zero, so we re-centre by the survival probability.
-    const conditioningShift = -Math.log(Math.max(0.05, probabilities.first_buy));
-    const vol24 = Math.max(0, Math.expm1(muVol + conditioningShift + sigmaVol * rng.normal()));
+    // Stage 2: the volume head includes zero-buyer launches. Preserve its
+    // arithmetic mean when redistributing draws among survivors. Shifting
+    // log1p(volume) before expm1 adds fictitious (1/p - 1) SOL to each survivor.
+    // This remains an approximation, not a fitted conditional distribution.
+    const unconditionalVolume = Math.max(0, Math.expm1(muVol + sigmaVol * rng.normal()));
+    const vol24 = unconditionalVolume / Math.max(probabilities.first_buy, 1e-6);
 
     // Stage 3: lifespan drives how much of the tail volume actually materialises.
     const lifeHours = clamp(Math.expm1(muLife + sigmaLife * rng.normal()), 0.5, 4380);
     // Volume decays roughly geometrically after day one.
     const decayDays = clamp(lifeHours / 24, 0.05, 90);
-    const tailVolume = vol24 * clamp(economics.lifetimeVolumeMultiplier * (1 - Math.exp(-decayDays / 2.5)), 0, 40);
+    const tailVolume = vol24 * clamp((economics.lifetimeVolumeMultiplier - 1) * (1 - Math.exp(-decayDays / 2.5)), 0, 40);
 
-    const curveVolume = vol24 + tailVolume;
-
-    // Stage 4: graduation unlocks the AMM fee stream on continuing volume.
+    // Graduation changes the fee venue. It cannot manufacture extra turnover.
+    // With no measured graduation time, allocate only the continuing tail to AMM.
     const graduated = rng.next() < probabilities.graduation / Math.max(probabilities.first_buy, 1e-6);
-    const ammVolume = graduated ? curveVolume * (1.5 + 4 * rng.next()) : 0;
+    const curveVolume = vol24 + (graduated ? 0 : tailVolume);
+    const ammVolume = graduated ? tailVolume : 0;
 
     const fees =
       curveVolume * economics.creatorFeeRateCurve + ammVolume * economics.creatorFeeRateAmm;

@@ -71,6 +71,10 @@ export class SettingsService {
     actor: SettingsActor,
     reason?: string,
   ): { settings: PlatformSettings; changed: Array<{ path: string; from: unknown; to: unknown }> } {
+    const execution = patch.execution as Record<string, unknown> | undefined;
+    if (actor.type !== 'user' && (execution?.usEligibilityReviewed === true || execution?.pumpCommercialPermissionConfirmed === true)) {
+      throw new AppError('validation_failed', 'Eligibility and commercial permission must be confirmed by a human operator.');
+    }
     const current = this.get();
     const merged = deepMerge(structuredClone(current) as Record<string, unknown>, patch);
     const parsed = PlatformSettings.safeParse(merged);

@@ -271,6 +271,11 @@ async function main(): Promise<void> {
      * needs means every mainnet launch is refused — while this command printed
      * "No blockers" and the operator went looking for the wrong problem.
      */
+    if (!settings.execution.usEligibilityReviewed || !settings.execution.pumpCommercialPermissionConfirmed) {
+      block('U.S. and Pump eligibility', 'Review applicable U.S. and state requirements and obtain required Pump commercial permission, then record both confirmations in Settings.');
+    } else {
+      pass('U.S. and Pump eligibility', 'operator confirmations recorded; not an independent legal determination');
+    }
     const dailyCeiling = settings.limits.maxSolSpendPerDay;
     const perLaunch = container.guard.estimatedLaunchCostLamports() / 1e9;
 

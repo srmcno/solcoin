@@ -89,6 +89,14 @@ export class GuardService {
         reason: `Emergency stop is engaged${config.emergencyStopReason ? `: ${config.emergencyStopReason}` : '.'}`,
       };
     }
+    if (operation === 'launch' && config.execution.network === 'mainnet' &&
+        (!config.execution.usEligibilityReviewed || !config.execution.pumpCommercialPermissionConfirmed)) {
+      return {
+        allowed: false,
+        code: 'eligibility_required',
+        reason: 'Mainnet launches require review of applicable U.S. and state requirements and confirmation of Pump commercial permission in Settings. An accessible website is not authorization.',
+      };
+    }
     const autonomyCapability = OPERATION_TO_CAPABILITY[operation];
     if (autonomyCapability && config.autonomy[autonomyCapability] === 'off') {
       return {
@@ -183,6 +191,19 @@ export class GuardService {
    * expired dependency, a protocol change — and continuing to retry burns rent
    * and fees on transactions that will not land.
    */
+  /** Recheck queued evidence at the spending boundary, not only at evaluation. */
+  checkLaunchEvidence(conceptId: string): GuardDecision {
+    const config = this.settings.get();
+    if (config.execution.network !== 'mainnet') return ALLOWED;
+    const row = this.db.$raw.prepare(`SELECT t.last_seen_at AS seen
+      FROM concepts c JOIN trends t ON t.id = c.trend_id WHERE c.id = ?`).get(conceptId) as { seen: number } | undefined;
+    const age = row ? (this.now() - row.seen) / 60_000 : NaN;
+    if (!Number.isFinite(age) || age < -2 || age > config.qualityGate.maxObservationAgeMinutes) {
+      return { allowed: false, code: 'stale_evidence', reason: 'Mainnet launch requires a recent source observation. Refresh research and reevaluate the candidate.' };
+    }
+    return ALLOWED;
+  }
+
   checkLaunch(walletBalanceLamports?: number): GuardDecision {
     const config = this.settings.get();
 

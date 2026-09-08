@@ -69,6 +69,8 @@ const SENSITIVE_PATHS = [
   'autonomy.wallet_transfer',
   'execution.network',
   'execution.phase',
+  'execution.usEligibilityReviewed',
+  'execution.pumpCommercialPermissionConfirmed',
   'execution.devBuySol',
   'limits.maxLaunchesPerDay',
   'limits.maxLaunchesPerHour',
@@ -1010,6 +1012,11 @@ function PhaseAndAutonomyTab({
 
   return (
     <div className="space-y-4">
+      <Group title="U.S. mainnet eligibility" description="Research and simulation remain available. These confirmations record your review; they do not grant permission or establish legality.">
+        <p className="text-sm text-ink-subtle">Pump's commercial-use restriction requires written agreement. Review <a className="underline" href="https://pump.fun/docs/terms-and-conditions" target="_blank" rel="noreferrer">current Pump terms</a> and applicable federal and state requirements before confirming.</p>
+        <ToggleField ctl={ctl} path="execution.usEligibilityReviewed" label="Applicable U.S. and state requirements reviewed" help="Confirm eligibility for the actual operator, token design, and activity. No geographic restriction bypass is supported." />
+        <ToggleField ctl={ctl} path="execution.pumpCommercialPermissionConfirmed" label="Required Pump commercial permission obtained" help="Confirm only after obtaining the written agreement required by Pump's terms for commercial use." />
+      </Group>
       <Card>
         <SectionHeader
           title="Operating phase"
@@ -1432,6 +1439,21 @@ function QualityGateTab({ ctl }: { ctl: Controller }) {
         and raises average quality; lowering it does the opposite. Nothing here overrides the phase ladder.
       </Note>
 
+      <Card>
+        <SectionHeader title="Aggressive early discovery" description="A research hypothesis, not a proven profitable strategy. Prioritize fresh, uncrowded trends while preserving spend limits, eligibility checks, and manual approval." />
+        <button className="btn btn-ghost mt-3" type="button" onClick={() => {
+          ctl.set('qualityGate.minOpportunityScore', 62);
+          ctl.set('qualityGate.maxSaturationScore', 0.25);
+          ctl.set('qualityGate.maxTrendAgeHours', 24);
+          ctl.set('qualityGate.maxObservationAgeMinutes', 20);
+          ctl.set('qualityGate.minSourceBreadth', 2);
+          ctl.set('qualityGate.maxTailConcentration', 0.55);
+          ctl.set('qualityGate.minExpectedValueSol', 0);
+          ctl.set('qualityGate.minProbabilityProfitable', 0.15);
+        }}>Stage aggressive discovery preset</button>
+        <p className="mt-2 text-xs text-ink-subtle">Stages changes for review in the save bar. Does not change budgets, network, or autonomy. Test in simulation and evaluate realised results before considering mainnet.</p>
+      </Card>
+
       <Group title="Score thresholds" description="Minimum modelled quality a candidate must reach to proceed.">
         <NumberField
           ctl={ctl}
@@ -1519,6 +1541,11 @@ function QualityGateTab({ ctl }: { ctl: Controller }) {
           step={0.01}
           help="Modelled chance the launch ends up profitable after fees."
         />
+      </Group>
+
+      <Group title="Fresh evidence and tail risk" description="Keep aggressive selection tied to recent observations and a bounded dependence on rare outcomes.">
+        <NumberField ctl={ctl} path="qualityGate.maxObservationAgeMinutes" label="Maximum observation age" unit="minutes" min={1} max={1440} step={1} help="A recently discovered trend can still have an old last observation. This check also applies during exploration." />
+        <NumberField ctl={ctl} path="qualityGate.maxTailConcentration" label="Maximum top 1% revenue share" unit="0–1" min={0} max={1} step={0.01} help="Reject forecasts whose average revenue depends too heavily on a handful of simulated jackpots." />
       </Group>
 
       <Group title="Hard blocks" description="Rules that stop a launch outright rather than scoring it down.">
